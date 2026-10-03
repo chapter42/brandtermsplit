@@ -77,6 +77,6 @@
 
 **Next**
 - Numbers in tables use the browser locale (`format="localized"`); a Dutch browser shows 1.000, an English one 1,000.
-- Test the Google login end-to-end once the OAuth client exists (local, then Streamlit Cloud).
+- Google login confirmed working locally (2026-10-03); still to check on Streamlit Cloud (secrets + cloud redirect URI).
 - Phase 2: BigQuery bulk export as a source (bigquery.readonly scope, dry-run cost estimate).
 - Optional: TypeSafe intent classification as an opt-in alternative to keyword themes.
