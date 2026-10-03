@@ -42,8 +42,6 @@
 - Multi-word brands: a space in the brand now also matches glued/hyphenated (centraal beheer ->
   centraalbeheer, centraal-beheer); subdomains in front of the brand are allowed; trailing
   punctuation is stripped from modifiers. Near-brand candidates also search the glued form.
-- Known loader gaps (not fixed yet): Dutch GSC headers, semicolon/tab separators, no manual
-  column mapping when detection fails.
 
 **Round 5 (same day)**
 - Decided with Roy what counts as brand: typos are matched automatically (fuzzy, edit distance scaled
@@ -53,7 +51,14 @@
   `match_method`; the Ruis tab shows a breakdown per method plus review lists.
 - GSC interface export (centraal beheer): noise from 55k to ~3k clicks.
 
+**Round 6 (same day)**
+- Loader: separator and encoding sniffing, all columns read as text (pandas read Dutch "1.200" as 1.2),
+  more column aliases incl. the Dutch GSC export, manual column mapping in the sidebar.
+- Small files broke three views (empty progress-bar max, empty boolean mask selecting columns in
+  head-term clustering, int/float mix in a number input); all fixed, tiny-input test added.
+
 **Next**
 - Numbers in tables use the browser locale (`format="localized"`); a Dutch browser shows 1.000, an English one 1,000.
-- Optional: average position column support, so *Kansen* can separate ranking from snippet problems.
+- Google login (st.login + OIDC, access token exposed) to pull data straight from the GSC API, later BigQuery bulk export.
+- Average position column support, so *Kansen* can separate ranking from snippet problems.
 - Optional: TypeSafe intent classification as an opt-in alternative to keyword themes.

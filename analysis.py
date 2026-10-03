@@ -4,6 +4,7 @@ All functions are pure pandas/numpy (plus scikit-learn for the semantic
 clustering) so they can be tested without Streamlit.
 """
 
+import io
 import re
 
 import numpy as np
@@ -46,41 +47,57 @@ THEME_MARKET = "Alleen land/markt"
 # --------------------------------------------------------------------------- #
 # Loading
 # --------------------------------------------------------------------------- #
-def load_queries(source) -> tuple[pd.DataFrame, list[str]]:
-    """Read a GSC-style query export and return a normalised frame.
+QUERY_COLUMNS = (
+    "query", "queries", "top queries", "query's", "populairste zoekopdrachten", "zoekopdracht",
+    "zoekopdrachten", "zoekterm", "zoektermen", "keyword", "keywords", "search term", "search query", "term",
+)
+CLICK_COLUMNS = ("total_clicks", "clicks", "klikken", "kliks", "url clicks")
+IMPRESSION_COLUMNS = ("total_impressions", "impressions", "vertoningen", "weergaven", "impr")
 
-    Output columns: query, clicks, impressions, clicks_<market>... and the
-    list of detected market names (from numeric ``clicks_<x>`` columns).
-    """
-    raw = pd.read_csv(source, low_memory=False)
-    cols = {c.lower().strip(): c for c in raw.columns}
 
-    def pick(*names):
-        for n in names:
-            if n in cols:
-                return cols[n]
-        return None
+def read_table(source) -> pd.DataFrame:
+    """Read a CSV whatever its separator (, ; tab |) or encoding (UTF-8 with or without BOM, Latin-1)."""
+    if hasattr(source, "read"):
+        data = source.read()
+    else:
+        with open(source, "rb") as fh:
+            data = fh.read()
+    for encoding in ("utf-8-sig", "latin-1"):
+        try:
+            text = data.decode(encoding)
+            break
+        except UnicodeDecodeError:
+            continue
+    header = text.split("\n", 1)[0]
+    sep = max([",", ";", "\t", "|"], key=header.count)
+    # Everything as text: pandas would read the Dutch "1.200" as 1.2. _to_number converts later.
+    return pd.read_csv(io.StringIO(text), sep=sep, dtype=str, keep_default_na=False)
 
-    q_col = pick("query", "zoekterm", "zoekopdracht", "keyword", "top queries", "query's")
-    c_col = pick("total_clicks", "clicks", "klikken")
-    i_col = pick("total_impressions", "impressions", "vertoningen")
-    if q_col is None or c_col is None or i_col is None:
-        raise ValueError(
-            "Kon de kolommen voor zoekterm, klikken en vertoningen niet vinden. "
-            f"Gevonden kolommen: {', '.join(raw.columns)}"
-        )
 
+def guess_columns(raw: pd.DataFrame) -> dict[str, str | None]:
+    """Best guess for the query, clicks and impressions columns (None when not found)."""
+    cols = {str(c).lower().strip(): c for c in raw.columns}
+
+    def pick(names):
+        return next((cols[n] for n in names if n in cols), None)
+
+    return {"query": pick(QUERY_COLUMNS), "clicks": pick(CLICK_COLUMNS), "impressions": pick(IMPRESSION_COLUMNS)}
+
+
+def normalise(raw: pd.DataFrame, query_col: str, clicks_col: str,
+              impressions_col: str) -> tuple[pd.DataFrame, list[str]]:
+    """Build the working frame: query, clicks, impressions, clicks_<market>... plus the market names."""
     df = pd.DataFrame({
-        "query": raw[q_col].astype(str).str.lower().str.strip(),
-        "clicks": _to_number(raw[c_col]),
-        "impressions": _to_number(raw[i_col]),
+        "query": raw[query_col].astype(str).str.lower().str.strip(),
+        "clicks": _to_number(raw[clicks_col]),
+        "impressions": _to_number(raw[impressions_col]),
     })
 
     markets = []
-    for low, orig in cols.items():
-        m = re.fullmatch(r"clicks_([a-z]{2,})", low)
-        if m and orig != c_col and m.group(1) != "total":
-            values = _to_number(raw[orig])
+    for col in raw.columns:
+        m = re.fullmatch(r"clicks_([a-z]{2,})", str(col).lower().strip())
+        if m and col != clicks_col and m.group(1) != "total":
+            values = _to_number(raw[col])
             if values.sum() > 0:
                 markets.append(m.group(1))
                 df[f"clicks_{m.group(1)}"] = values
@@ -90,10 +107,27 @@ def load_queries(source) -> tuple[pd.DataFrame, list[str]]:
     return df, markets
 
 
+def load_queries(source) -> tuple[pd.DataFrame, list[str]]:
+    """Read a GSC-style query export with automatic column detection."""
+    raw = read_table(source)
+    guess = guess_columns(raw)
+    if None in guess.values():
+        raise ValueError(
+            "Kon de kolommen voor zoekterm, klikken en vertoningen niet vinden. "
+            f"Gevonden kolommen: {', '.join(map(str, raw.columns))}"
+        )
+    return normalise(raw, guess["query"], guess["clicks"], guess["impressions"])
+
+
 def _to_number(s: pd.Series) -> pd.Series:
     if pd.api.types.is_numeric_dtype(s):
         return s.fillna(0).astype(float)
-    cleaned = s.astype(str).str.replace(r"[^\d\-]", "", regex=True)
+    # Thousands separators ("1.200", "1,200") go; a 1-2 digit decimal tail ("1234.0") is dropped first.
+    cleaned = (
+        s.astype(str).str.strip()
+        .str.replace(r"[.,]\d{1,2}$", "", regex=True)
+        .str.replace(r"[^\d\-]", "", regex=True)
+    )
     return pd.to_numeric(cleaned, errors="coerce").fillna(0).astype(float)
 
 
@@ -406,7 +440,7 @@ def head_term_clusters(df: pd.DataFrame, metric: str = "clicks", min_queries: in
             if len(words) == 1:
                 return True
             return stats.at[g, "vol"] >= 0.5 * max(uni_vol.get(w, 0) for w in words)
-        stats = stats[[bigram_ok(g) for g in stats.index]]
+        stats = stats[np.array([bigram_ok(g) for g in stats.index], dtype=bool)]
 
     stats["rank"] = stats["vol"].rank(ascending=False, method="first")
     ranked = long.join(stats["rank"], on="ngram", how="inner")

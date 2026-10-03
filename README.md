@@ -50,12 +50,18 @@ they cluster. The interface is in Dutch.
 
 ## Input
 
-A CSV with at least a query column and clicks and impressions. Recognised column names:
+Any CSV with a query column, clicks and impressions. Separator (comma, semicolon, tab), encoding
+(UTF-8 with or without BOM, Latin-1) and Dutch number formatting (`1.200`) are handled. Recognised
+column names include:
 
-- query: `query`, `zoekterm`, `keyword`, `top queries`
+- query: `query`, `top queries`, `populairste zoekopdrachten`, `zoekopdracht`, `zoekterm`, `keyword`, `search term`
 - clicks: `total_clicks`, `clicks`, `klikken`
-- impressions: `total_impressions`, `impressions`, `vertoningen`
+- impressions: `total_impressions`, `impressions`, `vertoningen`, `weergaven`
 - optional per market: `clicks_nl`, `clicks_be`, `clicks_de`, … (kept in the enriched export)
+
+When a column isn't recognised, pick it yourself under *Kolommen* in the sidebar. Both the English
+and the Dutch Search Console interface export work as-is (note that the interface only exports
+the top 1.000 queries).
 
 Upload the file in the sidebar, or drop it in the app folder and pick it from the list.
 CSV files are git-ignored so client data never ends up in the repo.

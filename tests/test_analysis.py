@@ -219,3 +219,33 @@ def test_partial_brand_by_ctr():
     assert not d.at["centraal", "is_branded"]
     off = an.split_brand(raw, ["centraal beheer"], [], partial_min_ctr=None)
     assert not off.is_branded.any()
+
+
+def test_read_table_dutch_excel_semicolon(tmp_path):
+    p = tmp_path / "nl.csv"
+    p.write_bytes("﻿Populairste zoekopdrachten;Klikken;Vertoningen;CTR\nacme inloggen;1.200;34.000;3,53%\n".encode())
+    df, _ = an.load_queries(p)
+    row = df.iloc[0]
+    assert (row["query"], row["clicks"], row["impressions"]) == ("acme inloggen", 1200, 34000)
+
+
+def test_read_table_tab_and_decimal_tail(tmp_path):
+    p = tmp_path / "t.csv"
+    p.write_text("Keyword\tClicks\tImpressions\nacme\t1234.0\t5,000\n")
+    row = an.load_queries(p)[0].iloc[0]
+    assert (row["clicks"], row["impressions"]) == (1234, 5000)
+
+
+def test_guess_columns_and_manual_normalise():
+    raw = pd.DataFrame({"Term": ["acme"], "Kliks totaal": ["5"], "Views": ["50"]})
+    guess = an.guess_columns(raw)
+    assert guess["query"] == "Term" and guess["clicks"] is None
+    df, _ = an.normalise(raw, "Term", "Kliks totaal", "Views")
+    assert df.iloc[0]["impressions"] == 50
+
+
+def test_head_term_clusters_tiny_input():
+    raw = pd.DataFrame({"query": ["acme login", "acme"], "clicks": [5, 50], "impressions": [50, 500]})
+    d = an.split_brand(raw, ["acme"], [])
+    clusters = an.head_term_clusters(d, "clicks", min_queries=5)
+    assert list(clusters) == ["(overig)", "(puur merk)"]

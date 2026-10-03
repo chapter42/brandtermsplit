@@ -63,6 +63,12 @@ def style(fig, height=None):
     return fig
 
 
+def bar_max(values):
+    """Upper bound for a progress column; empty or all-zero data would give NaN or 0."""
+    top = values.max() if len(values) else np.nan
+    return float(top) if pd.notna(top) and top > 0 else 1.0
+
+
 def num_col(label, help_text=None):
     return st.column_config.NumberColumn(label, format="localized", help=help_text)
 
@@ -129,10 +135,15 @@ def selection_table(df, metric, label, empty_hint=None, key=None):
 # Cached computation
 # --------------------------------------------------------------------------- #
 @st.cache_data(show_spinner="Data inlezen…")
-def load(data: bytes):
+def read_raw(data: bytes):
     import io
 
-    return an.load_queries(io.BytesIO(data))
+    return an.read_table(io.BytesIO(data))
+
+
+@st.cache_data(show_spinner="Kolommen omzetten…")
+def normalise(raw, query_col, clicks_col, impressions_col):
+    return an.normalise(raw, query_col, clicks_col, impressions_col)
 
 
 @st.cache_data(show_spinner="Merk splitsen en thema's toekennen…")
@@ -170,7 +181,9 @@ with st.sidebar:
     upload = st.file_uploader(
         "CSV met zoektermen",
         type="csv",
-        help="Kolommen: query, clicks/total_clicks, impressions/total_impressions. Optioneel clicks_<land> per markt.",
+        help="Elke CSV met een kolom voor zoekterm, klikken en vertoningen (komma, puntkomma of tab). "
+        "Search Console-exports in het Nederlands en Engels worden herkend; anders kies je de kolommen zelf. "
+        "Optioneel clicks_<land> per markt.",
     )
     local_csvs = sorted(APP_DIR.glob("*.csv"))
     local = None
@@ -179,7 +192,28 @@ with st.sidebar:
     if upload is None and local is None:
         st.info("Upload een export met zoektermen (bijv. uit Search Console) om te beginnen.")
         st.stop()
-    raw, markets = load(upload.getvalue() if upload else local.read_bytes())
+    table = read_raw(upload.getvalue() if upload else local.read_bytes())
+    guess = an.guess_columns(table)
+    columns = [str(c) for c in table.columns]
+    missing = None in guess.values()
+    with st.expander("Kolommen", expanded=missing):
+        if missing:
+            st.warning("Niet alle kolommen herkend: kies ze hieronder.")
+
+        def col_pick(label, key):
+            default = columns.index(str(guess[key])) if guess[key] is not None else None
+            return st.selectbox(label, columns, index=default, placeholder="Kies een kolom", key=f"col_{key}")
+
+        query_col = col_pick("Zoekterm", "query")
+        clicks_col = col_pick("Klikken", "clicks")
+        impressions_col = col_pick("Vertoningen", "impressions")
+    if None in (query_col, clicks_col, impressions_col):
+        st.info("Kies de kolommen voor zoekterm, klikken en vertoningen.")
+        st.stop()
+    if len({query_col, clicks_col, impressions_col}) < 3:
+        st.error("Kies drie verschillende kolommen.")
+        st.stop()
+    raw, markets = normalise(table, query_col, clicks_col, impressions_col)
     st.caption(
         f"{nl(len(raw))} unieke zoektermen"
         + (f" · markten: {', '.join(m.upper() for m in markets)}" if markets else "")
@@ -497,7 +531,7 @@ with tabs[1]:
     show_cols = ["ngram", "queries", "clicks", "impressions", "ctr", "click_share", "clicks_per_query"]
     cfg = dict(NGRAM_COLUMNS)
     cfg["click_share"] = st.column_config.ProgressColumn(
-        "Aandeel klikken", format="%.2f%%", min_value=0, max_value=float(ng_f["click_share"].max() or 1)
+        "Aandeel klikken", format="%.2f%%", min_value=0, max_value=bar_max(ng_f["click_share"])
     )
     ev_tab = st.dataframe(
         ng_f[show_cols],
@@ -718,7 +752,7 @@ with tabs[3]:
                 "ngram": st.column_config.TextColumn("Kopterm"),
                 "theme": st.column_config.TextColumn("Thema"),
                 "click_share": st.column_config.ProgressColumn(
-                    "Aandeel klikken", format="%.2f%%", min_value=0, max_value=float(stats["click_share"].max())
+                    "Aandeel klikken", format="%.2f%%", min_value=0, max_value=bar_max(stats["click_share"])
                 ),
             },
             hide_index=True,
@@ -1289,7 +1323,7 @@ verschillende rijen mag je niet zomaar optellen; het totaal bovenaan is een bove
     c1, c2 = st.columns(2)
     n_op = c1.segmented_control("N-gram  ", [1, 2, 3], default=2, format_func=lambda v: f"{v}-gram")
     ng_op = ngrams(view, n_op or 2, markets, "modifier", True, False)
-    default_thr = float(ng_op["impressions"].quantile(0.95)) if len(ng_op) else 0
+    default_thr = float(ng_op["impressions"].quantile(0.95)) if len(ng_op) else 0.0
     thr = c2.number_input("Min. vertoningen", 0.0, value=round(default_thr, -3), step=1000.0)
     op = an.opportunity_table(ng_op, thr)
     if op.empty:
