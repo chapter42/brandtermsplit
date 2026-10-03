@@ -28,6 +28,8 @@ TYPE_COLORS = {
     "Merk + modifier": "#4a6fa5",
     "Typo puur": SAGE,
     "Typo + modifier": "#a9c7b2",
+    "Deel merk puur": "#c9a227",
+    "Deel merk + modifier": "#e3cd7f",
     "Geen merk (ruis)": GREY,
 }
 
@@ -134,8 +136,8 @@ def load(data: bytes):
 
 
 @st.cache_data(show_spinner="Merk splitsen en thema's toekennen…")
-def prepare(df, brands, typos, theme_text):
-    out = an.split_brand(df, list(brands), list(typos))
+def prepare(df, brands, typos, theme_text, fuzzy, partial_min_ctr):
+    out = an.split_brand(df, list(brands), list(typos), fuzzy, partial_min_ctr)
     out["theme"] = an.assign_themes(out, an.parse_themes(theme_text))
     return out
 
@@ -193,8 +195,24 @@ with st.sidebar:
     typos = st.text_input(
         "Typo's / bijna-merk",
         placeholder="bijv. acmee, amce",
-        help="Tellen als merk-intentie, maar apart gelabeld. Kandidaten vind je in de tab 'Ruis & typo's'.",
+        help="Tellen als merk-intentie, maar apart gelabeld. Handig voor afkortingen (bijv. 'cb'). "
+        "Kandidaten vind je in de tab 'Ruis & typo's'.",
     )
+    fuzzy = st.toggle(
+        "Typo's automatisch herkennen",
+        value=True,
+        help="Alles binnen 1 letter (merk van 5-8 tekens) of 2 letters (langer) van het merk telt als typo, "
+        "net als het merk vastgeplakt aan een ander woord (mijnacmeshop). Bij merken korter dan 5 tekens "
+        "staat dit automatisch uit, anders zou 'bot' als 'bol' tellen.",
+    )
+    use_partial = st.toggle(
+        "Deel van het merk tellen bij hoge CTR",
+        value=True,
+        help="Alleen voor merknamen van meer woorden. Een los woord uit het merk (bijv. 'centraal' uit "
+        "'centraal beheer') telt als merk als de CTR van die zoekterm boven de drempel ligt: een hoge CTR "
+        "laat zien dat de zoeker het merk zocht.",
+    )
+    partial_ctr = st.slider("CTR-drempel deel van merk (%)", 0, 100, 20, disabled=not use_partial)
     with st.expander("Thema's (intentregels)"):
         theme_text = st.text_area(
             "Eén thema per regel: `Thema: woord, woord`. Volgorde = prioriteit.",
@@ -220,7 +238,7 @@ if not brand_list:
         "modifier en ruis, en daarna volgt de rest van de analyse."
     )
     st.stop()
-data = prepare(raw, brand_list, typo_list, theme_text)
+data = prepare(raw, brand_list, typo_list, theme_text, fuzzy, partial_ctr if use_partial else None)
 markets = tuple(markets)
 
 theme_options = sorted(t for t in data["theme"].unique() if t != "Geen merk (ruis)")
@@ -260,7 +278,7 @@ st.title("🔍 Brand Term Split")
 st.caption("Welke woorden typen mensen rondom het merk, hoeveel volume zit erachter en wat levert het op?")
 
 branded = data[data["is_branded"]]
-pure = data[data["query_type"].isin(["Puur merk", "Typo puur"])]
+pure = data[data["query_type"].isin(["Puur merk", "Typo puur", "Deel merk puur"])]
 k1, k2, k3, k4, k5, k6 = st.columns(6)
 k1.metric("Zoektermen", nl(len(data)), f"{nl(len(branded) / len(data) * 100, 1)}% echt merk", delta_color="off")
 k2.metric(
@@ -1303,7 +1321,81 @@ verschillende rijen mag je niet zomaar optellen; het totaal bovenaan is een bove
 # 9. Ruis & typo's
 # --------------------------------------------------------------------------- #
 with tabs[9]:
-    st.subheader("Wat is geen merk?")
+    st.subheader("Merk of ruis?")
+    st.caption(
+        "Hoe elke zoekterm als merk is herkend. Controleer vooral de typo's (fuzzy) en 'deel merk': "
+        "staat er iets tussen dat geen merk is, zet dan in de zijbalk de automatische herkenning uit, "
+        "verhoog de CTR-drempel of corrigeer met de typolijst."
+    )
+    METHOD_LABELS = {
+        "exact": "Exact merk (incl. .com, www, spaties)",
+        "typo (lijst)": "Typo/afkorting uit je lijst",
+        "typo (fuzzy)": "Typo, automatisch herkend",
+        "deel merk (CTR)": f"Deel van het merk, CTR ≥ {nl(partial_ctr)}%",
+        "geen": "Ruis: geen merk gevonden",
+    }
+    how = (
+        data.groupby("match_method")
+        .agg(queries=("query", "size"), clicks=("clicks", "sum"), impressions=("impressions", "sum"))
+        .reindex([m for m in METHOD_LABELS if m in set(data["match_method"])])
+        .reset_index()
+    )
+    how["ctr"] = how["clicks"] / how["impressions"] * 100
+    how["share"] = how["clicks"] / total_clicks * 100
+    how["examples"] = [
+        ", ".join(data[data["match_method"] == m].nlargest(5, "clicks")["query"]) for m in how["match_method"]
+    ]
+    how["match_method"] = how["match_method"].map(METHOD_LABELS)
+    st.dataframe(
+        how[["match_method", "queries", "clicks", "share", "ctr", "examples"]],
+        column_config={
+            "match_method": "Herkend als",
+            "queries": num_col("Zoektermen"),
+            "clicks": num_col("Klikken"),
+            "share": st.column_config.ProgressColumn("Aandeel klikken", format="%.1f%%", min_value=0, max_value=100),
+            "ctr": st.column_config.NumberColumn("CTR %", format="%.2f"),
+            "examples": st.column_config.TextColumn("Grootste voorbeelden", width="large"),
+        },
+        hide_index=True,
+        width="stretch",
+    )
+
+    review_cols = {
+        "query": "Zoekterm",
+        "match_method": "Herkend als",
+        "brand_variant": "Gevonden als",
+        "modifier": "Modifier",
+        "clicks": num_col("Klikken"),
+        "impressions": num_col("Vertoningen"),
+        "ctr": st.column_config.NumberColumn("CTR %", format="%.2f"),
+    }
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("**Te controleren: niet-exact als merk herkend**")
+        review = data[data["match_method"].isin(["typo (lijst)", "typo (fuzzy)", "deel merk (CTR)"])]
+        st.dataframe(
+            review.assign(ctr=review["clicks"] / review["impressions"] * 100)
+            .sort_values("clicks", ascending=False)[list(review_cols)]
+            .assign(match_method=lambda d: d["match_method"].map(METHOD_LABELS)),
+            column_config=review_cols,
+            hide_index=True,
+            width="stretch",
+            height=420,
+        )
+    with c2:
+        st.markdown("**Overgebleven ruis**: hoge CTR = waarschijnlijk toch merk")
+        rest = data[~data["is_branded"]]
+        st.dataframe(
+            rest.assign(ctr=rest["clicks"] / rest["impressions"] * 100).sort_values("clicks", ascending=False)[
+                ["query", "clicks", "impressions", "ctr"]
+            ],
+            column_config=review_cols,
+            hide_index=True,
+            width="stretch",
+            height=420,
+        )
+
+    st.markdown("**Woorden waarin de merknaam zit**")
     noise = data[~data["is_branded"]]
     c1, c2, c3 = st.columns(3)
     c1.metric(
@@ -1362,6 +1454,7 @@ with tabs[10]:
     cols = [
         "query",
         "query_type",
+        "match_method",
         "brand_variant",
         "modifier",
         "position",

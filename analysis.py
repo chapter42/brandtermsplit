@@ -123,8 +123,18 @@ def brand_pattern(brands: list[str]) -> re.Pattern:
     )
 
 
-def split_brand(df: pd.DataFrame, brands: list[str], typos: list[str]) -> pd.DataFrame:
-    """Classify each query and strip the brand to get the modifier."""
+def split_brand(df: pd.DataFrame, brands: list[str], typos: list[str], fuzzy: bool = True,
+                partial_min_ctr: float | None = None) -> pd.DataFrame:
+    """Classify each query and strip the brand to get the modifier.
+
+    Matching runs in stages; each stage only sees queries the earlier ones missed:
+    1. exact brand (with spelling/TLD variants, see ``brand_pattern``)
+    2. the manual typo/abbreviation list
+    3. fuzzy: a near-miss of the brand (edit distance scaled to brand length),
+       or the glued brand inside a longer word ("mijncentraalbeheer")
+    4. part of a multi-word brand ("centraal") when the query CTR is at least
+       ``partial_min_ctr`` percent; a high CTR shows the searcher wanted the brand
+    """
     out = df.copy()
     q = out["query"]
     p_brand = brand_pattern(brands)
@@ -136,32 +146,59 @@ def split_brand(df: pd.DataFrame, brands: list[str], typos: list[str]) -> pd.Dat
     variant = pd.Series("", index=out.index, dtype=object)
     variant[has_brand] = q[has_brand].str.extract(f"({p_brand.pattern})", expand=False)
     variant[has_typo] = q[has_typo].str.extract(f"({p_typo.pattern})", expand=False)
-    out["brand_variant"] = (
-        variant.fillna("").str.replace(r"\s+", " ", regex=True).str.strip()
-    )
 
     marked = q.copy()
     marked[has_brand] = q[has_brand].str.replace(p_brand, f" {BRAND_TOKEN} ", regex=True)
     marked[has_typo] = q[has_typo].str.replace(p_typo, f" {BRAND_TOKEN} ", regex=True)
-    out["marked"] = marked.str.replace(r"\s+", " ", regex=True).str.strip()
 
-    is_branded = has_brand | has_typo
+    method = pd.Series("", index=out.index, dtype=object)
+    method[has_brand] = "exact"
+    method[has_typo] = "typo (lijst)"
+
+    rest = ~(has_brand | has_typo)
+    if fuzzy:
+        for idx, query in q[rest].items():
+            hit = _fuzzy_mark(query, brands)
+            if hit:
+                variant[idx], marked[idx] = hit
+                method[idx] = "typo (fuzzy)"
+        rest = method.eq("")
+
+    if partial_min_ctr is not None:
+        words = {w for b in brands for w in b.lower().split() if len(b.split()) > 1 and len(w) >= 4}
+        if words:
+            ctr = out["clicks"] / out["impressions"].where(out["impressions"] > 0) * 100
+            for idx, query in q[rest & (ctr >= partial_min_ctr)].items():
+                tokens = query.split()
+                hits = [t for t in tokens if t in words]
+                if hits:
+                    variant[idx] = hits[0]
+                    marked[idx] = " ".join(BRAND_TOKEN if t in words else t for t in tokens)
+                    method[idx] = "deel merk (CTR)"
+
+    out["brand_variant"] = variant.fillna("").str.replace(r"\s+", " ", regex=True).str.strip()
+    out["marked"] = marked.str.replace(r"\s+", " ", regex=True).str.strip()
+    out["match_method"] = method.replace("", "geen")
+
+    is_branded = method.ne("")
     out["modifier"] = np.where(
         is_branded,
         out["marked"].str.replace(BRAND_TOKEN, " ", regex=False)
-        # leftovers like "/sdd" or ".nl" after the brand: drop leading punctuation
+        # leftovers like "/sdd" or ".nl" after the brand: drop leading/trailing punctuation
         .str.replace(r"(?<!\S)[./,;:\-]+|[./,;:\-]+(?!\S)", " ", regex=True)
         .str.replace(r"\s+", " ", regex=True).str.strip(),
         "",
     )
 
-    qtype = np.select(
-        [has_brand & out["modifier"].eq(""), has_brand,
-         has_typo & out["modifier"].eq(""), has_typo],
-        ["Puur merk", "Merk + modifier", "Typo puur", "Typo + modifier"],
+    pure = out["modifier"].eq("")
+    is_exact = method.eq("exact")
+    is_typo = method.str.startswith("typo")
+    is_part = method.eq("deel merk (CTR)")
+    out["query_type"] = np.select(
+        [is_exact & pure, is_exact, is_typo & pure, is_typo, is_part & pure, is_part],
+        ["Puur merk", "Merk + modifier", "Typo puur", "Typo + modifier", "Deel merk puur", "Deel merk + modifier"],
         default="Geen merk (ruis)",
     )
-    out["query_type"] = qtype
     out["is_branded"] = is_branded
 
     out["position"] = [
@@ -176,6 +213,59 @@ def split_brand(df: pd.DataFrame, brands: list[str], typos: list[str]) -> pd.Dat
         _market_tag(t) if isinstance(t, list) else "" for t in mod_tokens
     ]
     return out
+
+
+def fuzzy_distance(brand: str) -> int:
+    """Allowed typos for a brand: none for short brands (bol vs bot), more for long ones."""
+    length = len(brand.replace(" ", ""))
+    if length < 5:
+        return 0
+    return 1 if length <= 8 else 2
+
+
+def _levenshtein(a: str, b: str, limit: int) -> int:
+    """Edit distance, giving up (returns limit + 1) once it exceeds ``limit``."""
+    if abs(len(a) - len(b)) > limit:
+        return limit + 1
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb)))
+        if min(cur) > limit:
+            return limit + 1
+        prev = cur
+    return prev[-1]
+
+
+def _fuzzy_mark(query: str, brands: list[str]) -> tuple[str, str] | None:
+    """Find a near-miss of a brand in ``query``; return (variant, marked query)."""
+    tokens = query.split()
+    for brand in brands:
+        brand = brand.strip().lower()
+        glued = re.sub(r"[\s.\-]", "", brand)
+        limit = fuzzy_distance(brand)
+        n_words = len(brand.split())
+        # The glued brand inside longer words: mijncentraalbeheer, centraalbeheerppi, mijncentraal beheer.
+        if len(glued) >= 8:
+            for size in range(1, n_words + 1):
+                for i in range(len(tokens) - size + 1):
+                    joined = "".join(tokens[i:i + size])
+                    pos = joined.find(glued)
+                    if pos >= 0:
+                        parts = [joined[:pos], BRAND_TOKEN, joined[pos + len(glued):]]
+                        return " ".join(tokens[i:i + size]), " ".join(
+                            tokens[:i] + [p for p in parts if p] + tokens[i + size:]
+                        )
+        if limit == 0:
+            continue
+        for size in sorted({n_words, 1}, reverse=True):
+            for i in range(len(tokens) - size + 1):
+                window = tokens[i:i + size]
+                candidate = re.sub(r"[.\-]", "", "".join(window))
+                if candidate and _levenshtein(candidate, glued, limit) <= limit:
+                    return " ".join(window), " ".join(tokens[:i] + [BRAND_TOKEN] + tokens[i + size:])
+    return None
 
 
 def _modifier_position(marked: str) -> str:

@@ -10,7 +10,15 @@ they cluster. The interface is in Dutch.
 1. **Brand split.** You enter the brand name. The app recognises the variants people actually type
    (`acme`, `acme.com`, `acme com`, `acmecom`, `acme-com`, `www.acme.com`, `https://…`,
    `acme.be`, `acme.con`, …) as a whole word. Queries where the brand string only appears inside
-   another word (`acmetool`) count as noise. Known typos can be added as a separate "near-brand" layer.
+   another word (`acmetool`) count as noise. Matching then runs in stages, each one only on what the
+   previous stages missed:
+   - a manual list for abbreviations and typos (`cb`, `amce`);
+   - automatic typos: within 1 letter of the brand (5–8 characters) or 2 letters (longer), plus the
+     brand glued to another word (`mijnacmeshop`). Off for brands under 5 characters, so `bot` never counts as `bol`;
+   - part of a multi-word brand (`centraal` from `centraal beheer`) when the query CTR is above a
+     threshold (default 20%): a high CTR shows the searcher wanted the brand.
+
+   The *Ruis & typo's* tab shows how every query was recognised, so you can check the borderline cases.
 2. **Modifier analysis.** With the brand stripped, every query is reduced to its modifier
    ("inloggen", "klantenservice", "lego"). Position relative to the brand (before / after / around)
    and a country signal (be, nl, belgie) are stored as well.

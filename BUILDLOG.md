@@ -45,6 +45,14 @@
 - Known loader gaps (not fixed yet): Dutch GSC headers, semicolon/tab separators, no manual
   column mapping when detection fails.
 
+**Round 5 (same day)**
+- Decided with Roy what counts as brand: typos are matched automatically (fuzzy, edit distance scaled
+  to brand length, off below 5 characters), part of a multi-word brand counts when CTR >= threshold
+  (default 20%), a parent brand (Achmea) stays a normal modifier.
+- `split_brand` now matches in stages (exact -> manual list -> fuzzy -> part by CTR) and records
+  `match_method`; the Ruis tab shows a breakdown per method plus review lists.
+- GSC interface export (centraal beheer): noise from 55k to ~3k clicks.
+
 **Next**
 - Numbers in tables use the browser locale (`format="localized"`); a Dutch browser shows 1.000, an English one 1,000.
 - Optional: average position column support, so *Kansen* can separate ranking from snippet problems.

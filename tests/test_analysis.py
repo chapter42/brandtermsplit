@@ -170,9 +170,52 @@ def test_multiword_brand_modifier_and_typo_candidates():
             "impressions": [50, 50, 50],
         }
     )
-    d = an.split_brand(raw, ["centraal beheer"], []).set_index("query")
+    d = an.split_brand(raw, ["centraal beheer"], [], fuzzy=False).set_index("query")
     assert d.at["digitalekluis.centraal beheer.nl", "modifier"] == "digitalekluis"
     assert d.at["centraalbeheer.nl/activeren", "modifier"] == "activeren"
     assert not d.at["mijncentraalbeheer", "is_branded"]
     nb = an.near_brand_tokens(d.reset_index(), ["centraal beheer"])
     assert "mijncentraalbeheer" in nb["token"].tolist()
+
+
+@pytest.mark.parametrize(
+    "query,modifier",
+    [
+        ("central beheer", ""),
+        ("ventraal beheer ppi", "ppi"),
+        ("centraalbeher", ""),
+        ("mijncentraalbeheer", "mijn"),
+        ("mijncentraal beheer", "mijn"),
+        ("centraalbeheerppi.nl", "ppi.nl"),
+    ],
+)
+def test_fuzzy_typos(query, modifier):
+    raw = pd.DataFrame({"query": [query], "clicks": [1], "impressions": [10]})
+    row = an.split_brand(raw, ["centraal beheer"], []).iloc[0]
+    assert row["match_method"] == "typo (fuzzy)"
+    assert row["modifier"] == modifier
+
+
+def test_fuzzy_off_for_short_brands():
+    raw = pd.DataFrame({"query": ["bot", "bal", "bolt"], "clicks": [1] * 3, "impressions": [10] * 3})
+    assert not an.split_brand(raw, ["bol"], []).is_branded.any()
+    assert an.fuzzy_distance("bol") == 0
+    assert an.fuzzy_distance("zalando") == 1
+    assert an.fuzzy_distance("centraal beheer") == 2
+
+
+def test_partial_brand_by_ctr():
+    raw = pd.DataFrame(
+        {
+            "query": ["kentekencheck centraal", "beheer", "centraal"],
+            "clicks": [85, 2, 10],
+            "impressions": [100, 100, 100],
+        }
+    )
+    d = an.split_brand(raw, ["centraal beheer"], [], partial_min_ctr=20).set_index("query")
+    assert d.at["kentekencheck centraal", "query_type"] == "Deel merk + modifier"
+    assert d.at["kentekencheck centraal", "modifier"] == "kentekencheck"
+    assert not d.at["beheer", "is_branded"]
+    assert not d.at["centraal", "is_branded"]
+    off = an.split_brand(raw, ["centraal beheer"], [], partial_min_ctr=None)
+    assert not off.is_branded.any()
