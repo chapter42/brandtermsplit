@@ -173,11 +173,29 @@ See the README for the steps.
 """
 
 
-def auth_configured() -> bool:
+AUTH_KEYS = ("redirect_uri", "cookie_secret", "client_id", "client_secret", "server_metadata_url")
+
+
+def auth_section() -> dict:
     try:
-        return bool(st.secrets.get("auth", {}).get("client_id"))
+        return dict(st.secrets.get("auth", {}))
     except Exception:  # no secrets file at all
-        return False
+        return {}
+
+
+def auth_configured() -> bool:
+    return bool(auth_section().get("client_id"))
+
+
+def auth_problems() -> list[str]:
+    """Names (never values) of missing or empty login settings, checked before st.login raises."""
+    auth = auth_section()
+    problems = [f"`{key}`" for key in AUTH_KEYS if not auth.get(key)]
+    if "access" not in (auth.get("expose_tokens") or []):
+        problems.append('`expose_tokens = ["access"]`')
+    if "webmasters" not in str(dict(auth.get("client_kwargs") or {}).get("scope", "")):
+        problems.append("the Search Console scope in `[auth.client_kwargs]`")
+    return problems
 
 
 @st.cache_data(ttl=600, show_spinner="Loading properties…")
@@ -198,6 +216,13 @@ def gsc_panel():
         st.info(GSC_SETUP)
         st.stop()
     if not st.user.is_logged_in:
+        problems = auth_problems()
+        if problems:
+            st.error(
+                "The Google login settings are incomplete. Missing or empty in the `[auth]` block of the "
+                f"secrets: {', '.join(problems)}. See the README."
+            )
+            st.stop()
         st.button("Log in with Google", on_click=st.login, type="primary", width="stretch")
         st.caption(
             "You log in with your own Google account; the app only reads Search Console data "
