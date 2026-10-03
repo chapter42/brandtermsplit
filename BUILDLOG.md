@@ -75,8 +75,12 @@
 - MIT license added.
 - Running Streamlit server kept the old `analysis` module in memory after the rename; restart needed.
 
+**Round 9 (same day)**
+- Google login works locally and on https://brandtermsplit.streamlit.app. Cloud failure was a
+  commented-out `redirect_uri` in the cloud secrets; the app now names missing auth keys itself.
+
 **Next**
 - Numbers in tables use the browser locale (`format="localized"`); a Dutch browser shows 1.000, an English one 1,000.
-- Google login confirmed working locally (2026-10-03); still to check on Streamlit Cloud (secrets + cloud redirect URI).
+
 - Phase 2: BigQuery bulk export as a source (bigquery.readonly scope, dry-run cost estimate).
 - Optional: TypeSafe intent classification as an opt-in alternative to keyword themes.
