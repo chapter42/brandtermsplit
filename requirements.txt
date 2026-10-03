@@ -1,5 +1,6 @@
-streamlit>=1.50
+streamlit[auth]>=1.50
 pandas>=2.2
 plotly>=6.0
 scikit-learn>=1.5
 scipy
+requests

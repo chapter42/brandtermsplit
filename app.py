@@ -3,6 +3,7 @@
 Run: streamlit run app.py
 """
 
+from datetime import date, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -12,6 +13,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 import analysis as an
+import gsc
 
 APP_DIR = Path(__file__).parent
 
@@ -63,6 +65,11 @@ def style(fig, height=None):
     return fig
 
 
+POSITION_COL = st.column_config.NumberColumn(
+    "Gem. positie", format="%.1f", help="Gemiddelde positie in Google, gewogen op vertoningen"
+)
+
+
 def bar_max(values):
     """Upper bound for a progress column; empty or all-zero data would give NaN or 0."""
     top = values.max() if len(values) else np.nan
@@ -81,6 +88,7 @@ NGRAM_COLUMNS = {
     "ctr": st.column_config.NumberColumn("CTR %", format="%.2f"),
     "click_share": st.column_config.ProgressColumn("Aandeel klikken", format="%.2f%%", min_value=0, max_value=None),
     "clicks_per_query": num_col("Klikken per zoekterm"),
+    "avg_position": POSITION_COL,
 }
 
 
@@ -105,7 +113,9 @@ def selection_table(df, metric, label, empty_hint=None, key=None):
     )
     c1, c2 = st.columns([3, 1])
     table = df.sort_values(metric, ascending=False).assign(ctr=lambda d: d["clicks"] / d["impressions"] * 100)
-    cols = [c for c in ["query", "theme", "cluster", "clicks", "impressions", "ctr"] if c in table.columns]
+    cols = [
+        c for c in ["query", "theme", "cluster", "clicks", "impressions", "ctr", "avg_position"] if c in table.columns
+    ]
     c1.dataframe(
         table[cols],
         column_config={
@@ -115,6 +125,7 @@ def selection_table(df, metric, label, empty_hint=None, key=None):
             "clicks": num_col("Klikken"),
             "impressions": num_col("Vertoningen"),
             "ctr": st.column_config.NumberColumn("CTR %", format="%.2f"),
+            "avg_position": POSITION_COL,
         },
         hide_index=True,
         width="stretch",
@@ -142,8 +153,110 @@ def read_raw(data: bytes):
 
 
 @st.cache_data(show_spinner="Kolommen omzetten…")
-def normalise(raw, query_col, clicks_col, impressions_col):
-    return an.normalise(raw, query_col, clicks_col, impressions_col)
+def normalise(raw, query_col, clicks_col, impressions_col, position_col=None):
+    return an.normalise(raw, query_col, clicks_col, impressions_col, position_col)
+
+
+# --------------------------------------------------------------------------- #
+# Search Console via Google login
+# --------------------------------------------------------------------------- #
+GSC_SETUP = """
+**Google-login is nog niet ingesteld.** Zet in `.streamlit/secrets.toml` (lokaal) of bij *Settings → Secrets*
+(Streamlit Cloud) een `[auth]`-blok met `client_id`, `client_secret`, `redirect_uri`, `cookie_secret`,
+`server_metadata_url`, de Search Console-scope in `client_kwargs` en `expose_tokens = ["access"]`.
+Zie de README voor de stappen.
+"""
+
+
+def auth_configured() -> bool:
+    try:
+        return bool(st.secrets.get("auth", {}).get("client_id"))
+    except Exception:  # no secrets file at all
+        return False
+
+
+@st.cache_data(ttl=600, show_spinner="Properties ophalen…")
+def gsc_sites(user: str, _token: str):
+    return gsc.list_sites(_token)
+
+
+@st.cache_data(ttl=3600, show_spinner="Search Console-data ophalen…")
+def gsc_fetch(user: str, site: str, start: str, end: str, search_type: str, regex, max_rows: int, _token: str):
+    # ``user`` is part of the cache key so one user never sees another user's data.
+    data = gsc.fetch_queries(_token, site, start, end, search_type, regex, max_rows)
+    return an.normalise(data, "query", "clicks", "impressions", "avg_position")[0]
+
+
+def gsc_panel():
+    """Login, property and period choice. Returns the fetch request, or None."""
+    if not auth_configured():
+        st.info(GSC_SETUP)
+        st.stop()
+    if not st.user.is_logged_in:
+        st.button("Inloggen met Google", on_click=st.login, type="primary", width="stretch")
+        st.caption(
+            "Je logt in met je eigen Google-account; de app leest alleen Search Console-data "
+            "waar jij toegang toe hebt en bewaart niets."
+        )
+        st.stop()
+    token = st.user.tokens.get("access") if hasattr(st.user, "tokens") else None
+    st.caption(f"Ingelogd als **{st.user.get('email', '?')}**")
+    st.button("Uitloggen", on_click=st.logout)
+    if not token:
+        st.error(
+            'De login geeft geen access token door. Zet `expose_tokens = ["access"]` in het '
+            "`[auth]`-blok van de secrets en log opnieuw in."
+        )
+        st.stop()
+    try:
+        sites = gsc_sites(st.user.get("email", ""), token)
+    except gsc.GSCError as err:
+        st.error(str(err))
+        st.stop()
+    if not sites:
+        st.warning("Dit account heeft geen Search Console-properties.")
+        st.stop()
+
+    site = st.selectbox("Property", sites)
+    today = date.today()
+    latest = today - timedelta(days=3)  # GSC data lags a few days
+    period = st.date_input(
+        "Periode",
+        (latest - timedelta(days=89), latest),
+        min_value=today - timedelta(days=486),
+        max_value=latest,
+        format="DD-MM-YYYY",
+    )
+    search_type = st.selectbox(
+        "Zoektype",
+        ["web", "image", "video", "news"],
+        format_func={"web": "Web", "image": "Afbeeldingen", "video": "Video", "news": "Nieuws"}.get,
+    )
+    only_brand = st.toggle(
+        "Alleen zoektermen met (een deel van) de merknaam",
+        value=True,
+        help="Google filtert dan al op het merk: sneller en minder rijen. Typo's die geen merkwoord bevatten "
+        "(bijv. 'ventraal beheer') vallen dan wel weg; zet uit om alles op te halen en de app te laten splitsen.",
+    )
+    max_rows = st.select_slider("Max. rijen", [25_000, 50_000, 100_000, 250_000, 500_000], value=100_000)
+    if st.button("Data ophalen", type="primary", width="stretch"):
+        if not isinstance(period, tuple) or len(period) != 2:
+            st.warning("Kies een begin- én einddatum.")
+            st.stop()
+        st.session_state["gsc_request"] = {
+            "site": site,
+            "start": period[0].isoformat(),
+            "end": period[1].isoformat(),
+            "search_type": search_type,
+            "only_brand": only_brand,
+            "max_rows": max_rows,
+        }
+    request = st.session_state.get("gsc_request")
+    if request and request["site"] != site:
+        request = None
+    if request:
+        request = {**request, "token": token, "user": st.user.get("email", "")}
+    return request
 
 
 @st.cache_data(show_spinner="Merk splitsen en thema's toekennen…")
@@ -178,46 +291,62 @@ def sem_clusters(df, k, top_n):
 # --------------------------------------------------------------------------- #
 with st.sidebar:
     st.header("Data")
-    upload = st.file_uploader(
-        "CSV met zoektermen",
-        type="csv",
-        help="Elke CSV met een kolom voor zoekterm, klikken en vertoningen (komma, puntkomma of tab). "
-        "Search Console-exports in het Nederlands en Engels worden herkend; anders kies je de kolommen zelf. "
-        "Optioneel clicks_<land> per markt.",
-    )
-    local_csvs = sorted(APP_DIR.glob("*.csv"))
-    local = None
-    if upload is None and local_csvs:
-        local = st.selectbox("…of kies een lokaal bestand", local_csvs, format_func=lambda p: p.name)
-    if upload is None and local is None:
-        st.info("Upload een export met zoektermen (bijv. uit Search Console) om te beginnen.")
-        st.stop()
-    table = read_raw(upload.getvalue() if upload else local.read_bytes())
-    guess = an.guess_columns(table)
-    columns = [str(c) for c in table.columns]
-    missing = None in guess.values()
-    with st.expander("Kolommen", expanded=missing):
-        if missing:
-            st.warning("Niet alle kolommen herkend: kies ze hieronder.")
+    source = st.segmented_control("Bron", ["CSV-bestand", "Search Console"], default="CSV-bestand") or "CSV-bestand"
+    raw, markets, gsc_request = None, [], None
+    if source == "CSV-bestand":
+        upload = st.file_uploader(
+            "CSV met zoektermen",
+            type="csv",
+            help="Elke CSV met een kolom voor zoekterm, klikken en vertoningen (komma, puntkomma of tab). "
+            "Search Console-exports in het Nederlands en Engels worden herkend; anders kies je de kolommen zelf. "
+            "Optioneel clicks_<land> per markt.",
+        )
+        local_csvs = sorted(APP_DIR.glob("*.csv"))
+        local = None
+        if upload is None and local_csvs:
+            local = st.selectbox("…of kies een lokaal bestand", local_csvs, format_func=lambda p: p.name)
+        if upload is None and local is None:
+            st.info("Upload een export met zoektermen (bijv. uit Search Console) om te beginnen.")
+            st.stop()
+        table = read_raw(upload.getvalue() if upload else local.read_bytes())
+        guess = an.guess_columns(table)
+        columns = [str(c) for c in table.columns]
+        # Column choices belong to this file's layout; another file starts from its own guess.
+        file_key = abs(hash(tuple(columns)))
+        missing = None in (guess["query"], guess["clicks"], guess["impressions"])
+        with st.expander("Kolommen", expanded=missing):
+            if missing:
+                st.warning("Niet alle kolommen herkend: kies ze hieronder.")
 
-        def col_pick(label, key):
-            default = columns.index(str(guess[key])) if guess[key] is not None else None
-            return st.selectbox(label, columns, index=default, placeholder="Kies een kolom", key=f"col_{key}")
+            def col_pick(label, key, optional=False):
+                options = (["(geen)"] if optional else []) + columns
+                if guess[key] is not None:
+                    default = options.index(str(guess[key]))
+                else:
+                    default = 0 if optional else None
+                return st.selectbox(
+                    label, options, index=default, placeholder="Kies een kolom", key=f"col_{key}_{file_key}"
+                )
 
-        query_col = col_pick("Zoekterm", "query")
-        clicks_col = col_pick("Klikken", "clicks")
-        impressions_col = col_pick("Vertoningen", "impressions")
-    if None in (query_col, clicks_col, impressions_col):
-        st.info("Kies de kolommen voor zoekterm, klikken en vertoningen.")
-        st.stop()
-    if len({query_col, clicks_col, impressions_col}) < 3:
-        st.error("Kies drie verschillende kolommen.")
-        st.stop()
-    raw, markets = normalise(table, query_col, clicks_col, impressions_col)
-    st.caption(
-        f"{nl(len(raw))} unieke zoektermen"
-        + (f" · markten: {', '.join(m.upper() for m in markets)}" if markets else "")
-    )
+            query_col = col_pick("Zoekterm", "query")
+            clicks_col = col_pick("Klikken", "clicks")
+            impressions_col = col_pick("Vertoningen", "impressions")
+            position_col = col_pick("Gem. positie (optioneel)", "position", optional=True)
+        if None in (query_col, clicks_col, impressions_col):
+            st.info("Kies de kolommen voor zoekterm, klikken en vertoningen.")
+            st.stop()
+        if len({query_col, clicks_col, impressions_col}) < 3:
+            st.error("Kies drie verschillende kolommen.")
+            st.stop()
+        raw, markets = normalise(
+            table, query_col, clicks_col, impressions_col, None if position_col == "(geen)" else position_col
+        )
+        st.caption(
+            f"{nl(len(raw))} unieke zoektermen"
+            + (f" · markten: {', '.join(m.upper() for m in markets)}" if markets else "")
+        )
+    else:
+        gsc_request = gsc_panel()
 
     st.header("Merk")
     brands = st.text_input(
@@ -272,7 +401,37 @@ if not brand_list:
         "modifier en ruis, en daarna volgt de rest van de analyse."
     )
     st.stop()
+if source == "Search Console":
+    if gsc_request is None:
+        st.title("🔍 Brand Term Split")
+        st.info("Kies in de zijbalk een property en periode en klik op **Data ophalen**.")
+        st.stop()
+    regex = gsc.brand_regex(list(brand_list) + list(typo_list)) if gsc_request["only_brand"] else None
+    try:
+        raw = gsc_fetch(
+            gsc_request["user"],
+            gsc_request["site"],
+            gsc_request["start"],
+            gsc_request["end"],
+            gsc_request["search_type"],
+            regex,
+            gsc_request["max_rows"],
+            gsc_request["token"],
+        )
+    except gsc.GSCError as err:
+        st.error(str(err))
+        st.stop()
+    if raw.empty:
+        st.warning("Search Console gaf geen rijen terug voor deze keuze.")
+        st.stop()
+    with st.sidebar:
+        st.caption(
+            f"{nl(len(raw))} zoektermen opgehaald · {gsc_request['site']} · "
+            f"{gsc_request['start']} t/m {gsc_request['end']}"
+            + (" · maximum bereikt, verhoog 'Max. rijen' voor meer" if len(raw) >= gsc_request["max_rows"] else "")
+        )
 data = prepare(raw, brand_list, typo_list, theme_text, fuzzy, partial_ctr if use_partial else None)
+HAS_POSITION = "avg_position" in data.columns
 markets = tuple(markets)
 
 theme_options = sorted(t for t in data["theme"].unique() if t != "Geen merk (ruis)")
@@ -529,6 +688,7 @@ with tabs[1]:
 
     st.markdown("**Alle n-grammen**")
     show_cols = ["ngram", "queries", "clicks", "impressions", "ctr", "click_share", "clicks_per_query"]
+    show_cols += ["avg_position"] if "avg_position" in ng_f.columns else []
     cfg = dict(NGRAM_COLUMNS)
     cfg["click_share"] = st.column_config.ProgressColumn(
         "Aandeel klikken", format="%.2f%%", min_value=0, max_value=bar_max(ng_f["click_share"])
@@ -1166,8 +1326,12 @@ with tabs[7]:
             .reset_index()
             .rename(columns={"cluster": "item"})
         )
+        if HAS_POSITION:
+            weighted = (hc["avg_position"] * hc["impressions"]).groupby(hc["cluster"]).sum()
+            sc_df["avg_position"] = (sc_df["item"].map(weighted) / sc_df["impressions"]).round(2)
     else:
-        sc_df = view[["query", "clicks", "impressions"]].rename(columns={"query": "item"}).assign(queries=1)
+        keep = ["query", "clicks", "impressions"] + (["avg_position"] if HAS_POSITION else [])
+        sc_df = view[keep].rename(columns={"query": "item"}).assign(queries=1)
     sc_df = sc_df[(sc_df["impressions"] >= max(min_imp_sc, 1)) & (sc_df["clicks"] > 0)].copy()
 
     if sc_df.empty:
@@ -1212,6 +1376,7 @@ with tabs[7]:
                 "impressions": ":,.0f",
                 "clicks": ":,.0f",
                 "vs_median": ":+.2f",
+                **({"avg_position": ":.1f"} if "avg_position" in plot_df.columns else {}),
             },
             labels={
                 "impressions": "Vertoningen (log)",
@@ -1272,6 +1437,7 @@ with tabs[7]:
         st.dataframe(
             table.sort_values("impressions", ascending=False)[
                 ["item", "queries", "impressions", "clicks", "ctr", "vs_median", "click_delta"]
+                + (["avg_position"] if "avg_position" in table.columns else [])
             ],
             column_config={
                 "item": {"Kopterm": "Kopterm", "Zoekterm": "Zoekterm"}.get(unit, "N-gram"),
@@ -1281,6 +1447,7 @@ with tabs[7]:
                 "ctr": st.column_config.NumberColumn("CTR %", format="%.2f"),
                 "vs_median": st.column_config.NumberColumn("t.o.v. mediaan (pp)", format="%+.2f"),
                 "click_delta": num_col("Klikken t.o.v. mediaan"),
+                "avg_position": POSITION_COL,
             },
             hide_index=True,
             width="stretch",
@@ -1315,7 +1482,9 @@ Zoek de term daarna op in Google en kijk wat de oorzaak is: staat het merk niet 
 advertentie, shoppingblok, AI Overview of marktplaats de klik, of sluit de titel/snippet niet aan
 op wat de zoeker wil?
 
-**Let op:** de export bevat geen gemiddelde positie, dus een lage CTR kan ook een lage ranking zijn.
+**Gemiddelde positie:** zit die in je data (Search Console-export of -koppeling), dan staat hij in de
+tabel. Positie boven ~3 met een lage CTR: eerst de ranking. Positie 1-2 met een lage CTR: dan ligt het
+aan de snippet of aan wat er boven je staat. Zonder positie kan een lage CTR beide betekenen.
 N-grammen overlappen (*cadeaukaart* zit ook in *cadeaukaart saldo*), dus de gemiste klikken van
 verschillende rijen mag je niet zomaar optellen; het totaal bovenaan is een bovengrens.
 """
@@ -1345,7 +1514,10 @@ verschillende rijen mag je niet zomaar optellen; het totaal bovenaan is een bove
         fig.add_hline(y=pool["ctr"].median(), line_dash="dot", annotation_text="mediaan CTR")
         st.plotly_chart(style(fig, 480), width="stretch")
         st.dataframe(
-            op.head(50)[["ngram", "queries", "impressions", "clicks", "ctr", "missed_clicks"]],
+            op.head(50)[
+                ["ngram", "queries", "impressions", "clicks", "ctr", "missed_clicks"]
+                + (["avg_position"] if "avg_position" in op.columns else [])
+            ],
             column_config={**NGRAM_COLUMNS, "missed_clicks": num_col("Gemiste klikken")},
             hide_index=True,
             width="stretch",
@@ -1498,7 +1670,8 @@ with tabs[10]:
         "clicks",
         "impressions",
         "ctr",
-    ] + [f"clicks_{m}" for m in markets]
+    ]
+    cols += (["avg_position"] if HAS_POSITION else []) + [f"clicks_{m}" for m in markets]
     search = st.text_input("Zoek in zoektermen")
     shown = export[cols]
     if search:

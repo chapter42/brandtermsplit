@@ -57,8 +57,18 @@
 - Small files broke three views (empty progress-bar max, empty boolean mask selecting columns in
   head-term clustering, int/float mix in a number input); all fixed, tiny-input test added.
 
+**Round 7 (same day)**
+- Search Console as a data source: `gsc.py` (REST via requests: list properties, paginated
+  searchAnalytics with optional RE2 brand filter), `st.login` with Google OIDC and the access token
+  exposed via `expose_tokens`. Cache keyed on the user's e-mail so users never share data.
+- Average position (`avg_position`, impression-weighted) from GSC CSV exports and the API, shown in
+  n-gram, Kansen, scatter, selection and export tables. Named avg_position because `position` is
+  already the modifier position (before/after brand).
+- Bug: column choices stuck when switching files (widget keys); keys now include the file's columns.
+- New dependency: streamlit[auth] (Authlib). Secrets template in `.streamlit/secrets.toml.example`.
+
 **Next**
 - Numbers in tables use the browser locale (`format="localized"`); a Dutch browser shows 1.000, an English one 1,000.
-- Google login (st.login + OIDC, access token exposed) to pull data straight from the GSC API, later BigQuery bulk export.
-- Average position column support, so *Kansen* can separate ranking from snippet problems.
+- Test the Google login end-to-end once the OAuth client exists (local, then Streamlit Cloud).
+- Phase 2: BigQuery bulk export as a source (bigquery.readonly scope, dry-run cost estimate).
 - Optional: TypeSafe intent classification as an opt-in alternative to keyword themes.

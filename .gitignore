@@ -9,3 +9,6 @@ __pycache__/
 .venv/
 .env
 .DS_Store
+
+# Streamlit secrets (OAuth client, cookie secret)
+.streamlit/secrets.toml

@@ -249,3 +249,26 @@ def test_head_term_clusters_tiny_input():
     d = an.split_brand(raw, ["acme"], [])
     clusters = an.head_term_clusters(d, "clicks", min_queries=5)
     assert list(clusters) == ["(overig)", "(puur merk)"]
+
+
+def test_position_weighted_and_dutch_decimal(tmp_path):
+    p = tmp_path / "gsc.csv"
+    p.write_text(
+        "Populairste zoekopdrachten;Klikken;Vertoningen;CTR;Positie\nacme;10;100;10%;1,5\nAcme ;0;300;0%;3,5\n"
+    )
+    df, _ = an.load_queries(p)
+    assert df.iloc[0]["avg_position"] == pytest.approx((1.5 * 100 + 3.5 * 300) / 400)
+
+
+def test_ngram_table_position():
+    raw = pd.DataFrame(
+        {
+            "query": ["acme login", "login acme"],
+            "clicks": [1, 1],
+            "impressions": [100, 300],
+            "avg_position": [1.0, 3.0],
+        }
+    )
+    d = an.split_brand(raw, ["acme"], [])
+    ng = an.ngram_table(d, 1, []).set_index("ngram")
+    assert ng.at["login", "avg_position"] == pytest.approx(2.5)

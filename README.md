@@ -66,6 +66,30 @@ the top 1.000 queries).
 Upload the file in the sidebar, or drop it in the app folder and pick it from the list.
 CSV files are git-ignored so client data never ends up in the repo.
 
+## Search Console via Google login
+
+Instead of a CSV you can pick **Bron → Search Console** in the sidebar: log in with Google, choose a
+property, a period (up to 16 months) and optionally let Google pre-filter on the brand. The app
+fetches the data through the Search Console API in pages of 25.000 rows (no 1.000-row limit like the
+interface export) and adds the average position. The data is only cached in the running app, per user,
+for an hour; nothing is stored.
+
+One-time setup in Google Cloud:
+
+1. Enable the **Google Search Console API** in your project.
+2. **Google Auth Platform → Branding/Audience**: create the consent screen. *Internal* lets only accounts
+   of your own Google Workspace log in without verification; *External* needs test users (max. 100,
+   logins expire after 7 days) or Google verification, because the Search Console scope is "sensitive".
+3. **Data access**: add the scope `https://www.googleapis.com/auth/webmasters.readonly`.
+4. **Clients → Create client → Web application**, with these authorised redirect URIs:
+   - `http://localhost:8501/oauth2callback`
+   - `https://<your-app>.streamlit.app/oauth2callback`
+5. Copy `.streamlit/secrets.toml.example` to `.streamlit/secrets.toml` and fill in `client_id`,
+   `client_secret` and a random `cookie_secret`. On Streamlit Cloud, paste the same block under
+   *Settings → Secrets* with the cloud `redirect_uri`.
+
+A Google login lasts an hour; after that, log out and in again.
+
 ## Run
 
 ```bash

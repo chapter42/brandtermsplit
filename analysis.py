@@ -53,6 +53,7 @@ QUERY_COLUMNS = (
 )
 CLICK_COLUMNS = ("total_clicks", "clicks", "klikken", "kliks", "url clicks")
 IMPRESSION_COLUMNS = ("total_impressions", "impressions", "vertoningen", "weergaven", "impr")
+POSITION_COLUMNS = ("position", "positie", "avg. position", "average position", "gemiddelde positie", "avg_position")
 
 
 def read_table(source) -> pd.DataFrame:
@@ -81,17 +82,29 @@ def guess_columns(raw: pd.DataFrame) -> dict[str, str | None]:
     def pick(names):
         return next((cols[n] for n in names if n in cols), None)
 
-    return {"query": pick(QUERY_COLUMNS), "clicks": pick(CLICK_COLUMNS), "impressions": pick(IMPRESSION_COLUMNS)}
+    return {
+        "query": pick(QUERY_COLUMNS),
+        "clicks": pick(CLICK_COLUMNS),
+        "impressions": pick(IMPRESSION_COLUMNS),
+        "position": pick(POSITION_COLUMNS),
+    }
 
 
-def normalise(raw: pd.DataFrame, query_col: str, clicks_col: str,
-              impressions_col: str) -> tuple[pd.DataFrame, list[str]]:
-    """Build the working frame: query, clicks, impressions, clicks_<market>... plus the market names."""
+def normalise(raw: pd.DataFrame, query_col: str, clicks_col: str, impressions_col: str,
+              position_col: str | None = None) -> tuple[pd.DataFrame, list[str]]:
+    """Build the working frame: query, clicks, impressions, [avg_position], clicks_<market>... plus market names."""
     df = pd.DataFrame({
         "query": raw[query_col].astype(str).str.lower().str.strip(),
         "clicks": _to_number(raw[clicks_col]),
         "impressions": _to_number(raw[impressions_col]),
     })
+    if position_col is not None:
+        # Average position: decimals matter here, and both "1,24" and "1.24" occur.
+        pos = raw[position_col]
+        if not pd.api.types.is_numeric_dtype(pos):
+            pos = pd.to_numeric(pos.astype(str).str.strip().str.replace(",", ".", regex=False), errors="coerce")
+        # Weighted by impressions so duplicate queries can be summed; divided again below.
+        df["avg_position"] = pos.fillna(0).to_numpy() * df["impressions"]
 
     markets = []
     for col in raw.columns:
@@ -104,6 +117,8 @@ def normalise(raw: pd.DataFrame, query_col: str, clicks_col: str,
 
     df = df[df["query"].ne("") & df["query"].ne("nan")]
     df = df.groupby("query", as_index=False).sum(numeric_only=True)
+    if "avg_position" in df:
+        df["avg_position"] = (df["avg_position"] / df["impressions"].where(df["impressions"] > 0)).round(2)
     return df, markets
 
 
@@ -111,12 +126,12 @@ def load_queries(source) -> tuple[pd.DataFrame, list[str]]:
     """Read a GSC-style query export with automatic column detection."""
     raw = read_table(source)
     guess = guess_columns(raw)
-    if None in guess.values():
+    if None in (guess["query"], guess["clicks"], guess["impressions"]):
         raise ValueError(
             "Kon de kolommen voor zoekterm, klikken en vertoningen niet vinden. "
             f"Gevonden kolommen: {', '.join(map(str, raw.columns))}"
         )
-    return normalise(raw, guess["query"], guess["clicks"], guess["impressions"])
+    return normalise(raw, guess["query"], guess["clicks"], guess["impressions"], guess["position"])
 
 
 def _to_number(s: pd.Series) -> pd.Series:
@@ -399,11 +414,17 @@ def ngram_table(df: pd.DataFrame, n: int, markets: list[str], column: str = "mod
     if long.empty:
         return pd.DataFrame(columns=["ngram", "queries", "clicks", "impressions", "ctr"])
     metric_cols = ["clicks", "impressions"] + [f"clicks_{m}" for m in markets]
+    has_position = "avg_position" in df.columns
+    if has_position:
+        df = df.assign(pos_weight=df["avg_position"].fillna(0) * df["impressions"])
+        metric_cols.append("pos_weight")
     joined = long.join(df[metric_cols], on="row")
     agg = joined.groupby("ngram").agg(
         queries=("row", "size"), **{c: (c, "sum") for c in metric_cols}
     ).reset_index()
     agg["ctr"] = np.where(agg["impressions"] > 0, agg["clicks"] / agg["impressions"] * 100, 0.0)
+    if has_position:
+        agg["avg_position"] = (agg.pop("pos_weight") / agg["impressions"].where(agg["impressions"] > 0)).round(2)
     total_clicks = df["clicks"].sum()
     agg["click_share"] = agg["clicks"] / total_clicks * 100 if total_clicks else 0.0
     agg["clicks_per_query"] = agg["clicks"] / agg["queries"]
