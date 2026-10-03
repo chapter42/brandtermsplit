@@ -1,0 +1,464 @@
+"""Brand term split and n-gram analysis for branded search queries.
+
+All functions are pure pandas/numpy (plus scikit-learn for the semantic
+clustering) so they can be tested without Streamlit.
+"""
+
+import re
+
+import numpy as np
+import pandas as pd
+
+BRAND_TOKEN = "‹merk›"
+
+
+MARKET_TOKENS = {
+    "be", "belgie", "belgië", "belgium", "belgique", "vlaanderen",
+    "nl", "nederland", "netherlands", "holland",
+}
+
+STOPWORDS = {
+    "de", "het", "een", "van", "voor", "met", "bij", "in", "op", "en", "of",
+    "te", "naar", "om", "aan", "is", "je", "ik", "mijn", "die", "dat", "er",
+    "ook", "als", "the", "a", "an", "for", "and", "to", "on", "at",
+    "-", "&", "+", "/", ".", ":", "|",
+}
+
+# Ordered: the first theme that matches a query wins.
+DEFAULT_THEMES = {
+    "Inloggen & account": "inloggen, login, log, inlog, account, wachtwoord, registreren, aanmelden, uitloggen, profiel, mijn",
+    "Klantenservice & contact": "klantenservice, klantendienst, contact, bellen, telefoonnummer, telefoon, nummer, chat, chatten, mailen, email, mail, whatsapp, klacht, klachten, hulp, help, service, customer, bereikbaar",
+    "Cadeaukaart & saldo": "cadeaukaart, cadeaubon, cadeaukaarten, bon, bonnen, saldo, giftcard, gift, tegoed, waardebon, vvv, checken, inwisselen, verzilveren, kaart",
+    "Bestellingen & retour": "bestelling, bestellingen, retour, retourneren, retouren, terugsturen, annuleren, track, volgen, status, garantie, reparatie, terugbetaling, geannuleerd",
+    "Bezorging & afhalen": "bezorging, bezorgen, levering, leveren, verzending, verzendkosten, afhaalpunt, pakket, pakketje, bezorgd, ophalen, levertijd, bezorger",
+    "Betalen": "betalen, achteraf, klarna, ideal, rekening, betaling, factuur, afbetalen, gespreid, betaalmethode, creditcard",
+    "Zakelijk & verkopen": "zakelijk, verkopen, partner, partners, partnerplatform, verkoper, seller, affiliate, logistiek, adverteren, sell",
+    "Acties & abonnement": "korting, kortingscode, kortingscodes, actie, acties, aanbieding, aanbiedingen, deals, deal, black, friday, sale, uitverkoop, dagdeal, cyber, outlet, tweedekans",
+    "Bedrijf & werken": "vacatures, vacature, werken, werkenbij, hoofdkantoor, adres, kantoor, aandelen, ceo, eigenaar, jobs, stage, magazijn, nieuws, bedrijf",
+    "Website & app": "app, website, site, online, winkel, webshop, homepage, storing, www",
+}
+
+THEME_PRODUCT = "Product & assortiment"
+THEME_PURE = "Puur merk"
+THEME_MARKET = "Alleen land/markt"
+
+
+# --------------------------------------------------------------------------- #
+# Loading
+# --------------------------------------------------------------------------- #
+def load_queries(source) -> tuple[pd.DataFrame, list[str]]:
+    """Read a GSC-style query export and return a normalised frame.
+
+    Output columns: query, clicks, impressions, clicks_<market>... and the
+    list of detected market names (from numeric ``clicks_<x>`` columns).
+    """
+    raw = pd.read_csv(source, low_memory=False)
+    cols = {c.lower().strip(): c for c in raw.columns}
+
+    def pick(*names):
+        for n in names:
+            if n in cols:
+                return cols[n]
+        return None
+
+    q_col = pick("query", "zoekterm", "zoekopdracht", "keyword", "top queries", "query's")
+    c_col = pick("total_clicks", "clicks", "klikken")
+    i_col = pick("total_impressions", "impressions", "vertoningen")
+    if q_col is None or c_col is None or i_col is None:
+        raise ValueError(
+            "Kon de kolommen voor zoekterm, klikken en vertoningen niet vinden. "
+            f"Gevonden kolommen: {', '.join(raw.columns)}"
+        )
+
+    df = pd.DataFrame({
+        "query": raw[q_col].astype(str).str.lower().str.strip(),
+        "clicks": _to_number(raw[c_col]),
+        "impressions": _to_number(raw[i_col]),
+    })
+
+    markets = []
+    for low, orig in cols.items():
+        m = re.fullmatch(r"clicks_([a-z]{2,})", low)
+        if m and orig != c_col and m.group(1) != "total":
+            values = _to_number(raw[orig])
+            if values.sum() > 0:
+                markets.append(m.group(1))
+                df[f"clicks_{m.group(1)}"] = values
+
+    df = df[df["query"].ne("") & df["query"].ne("nan")]
+    df = df.groupby("query", as_index=False).sum(numeric_only=True)
+    return df, markets
+
+
+def _to_number(s: pd.Series) -> pd.Series:
+    if pd.api.types.is_numeric_dtype(s):
+        return s.fillna(0).astype(float)
+    cleaned = s.astype(str).str.replace(r"[^\d\-]", "", regex=True)
+    return pd.to_numeric(cleaned, errors="coerce").fillna(0).astype(float)
+
+
+# --------------------------------------------------------------------------- #
+# Brand split
+# --------------------------------------------------------------------------- #
+# "com" and the ways people mistype it after the brand (acme.con, acme,vom, acme cm).
+TLD_TYPOS = "com|con|vom|xom|cpm|cim|comm|coom|cm"
+
+
+def brand_pattern(brands: list[str]) -> re.Pattern:
+    """Regex matching a brand term incl. protocol, www, TLD and spacing variants.
+
+    ``acme`` matches acme, acme.com, acme com, acmecom, acme-com, www.acme.com,
+    acme.nl, acme. be, https://www.acme.com, ... but not acmes or acmetool.
+    """
+    terms = sorted({b.strip().lower() for b in brands if b.strip()}, key=len, reverse=True)
+    if not terms:
+        terms = ["\u0000"]  # matches nothing
+    alt = "|".join(re.escape(t) for t in terms)
+    return re.compile(
+        rf"(?<![\w.])(?:https?://)?(?:www\s*\.\s*)?(?:{alt})"
+        rf"(?:\s*[.,;\-]?\s*(?:{TLD_TYPOS})\b|\s*[.,;\-]\s*(?:nl|be|co|om|c)\b|\s*[.,;])?(?:\.(?:nl|be)\b)?(?![\w\-])"
+    )
+
+
+def split_brand(df: pd.DataFrame, brands: list[str], typos: list[str]) -> pd.DataFrame:
+    """Classify each query and strip the brand to get the modifier."""
+    out = df.copy()
+    q = out["query"]
+    p_brand = brand_pattern(brands)
+    p_typo = brand_pattern(typos)
+
+    has_brand = q.str.contains(p_brand)
+    has_typo = ~has_brand & q.str.contains(p_typo)
+
+    variant = pd.Series("", index=out.index, dtype=object)
+    variant[has_brand] = q[has_brand].str.extract(f"({p_brand.pattern})", expand=False)
+    variant[has_typo] = q[has_typo].str.extract(f"({p_typo.pattern})", expand=False)
+    out["brand_variant"] = (
+        variant.fillna("").str.replace(r"\s+", " ", regex=True).str.strip()
+    )
+
+    marked = q.copy()
+    marked[has_brand] = q[has_brand].str.replace(p_brand, f" {BRAND_TOKEN} ", regex=True)
+    marked[has_typo] = q[has_typo].str.replace(p_typo, f" {BRAND_TOKEN} ", regex=True)
+    out["marked"] = marked.str.replace(r"\s+", " ", regex=True).str.strip()
+
+    is_branded = has_brand | has_typo
+    out["modifier"] = np.where(
+        is_branded,
+        out["marked"].str.replace(BRAND_TOKEN, " ", regex=False)
+        # leftovers like "/sdd" or ".nl" after the brand: drop leading punctuation
+        .str.replace(r"(?<!\S)[./,;:\-]+", " ", regex=True)
+        .str.replace(r"\s+", " ", regex=True).str.strip(),
+        "",
+    )
+
+    qtype = np.select(
+        [has_brand & out["modifier"].eq(""), has_brand,
+         has_typo & out["modifier"].eq(""), has_typo],
+        ["Puur merk", "Merk + modifier", "Typo puur", "Typo + modifier"],
+        default="Geen merk (ruis)",
+    )
+    out["query_type"] = qtype
+    out["is_branded"] = is_branded
+
+    out["position"] = [
+        _modifier_position(m) if b else "n.v.t."
+        for m, b in zip(out["marked"], is_branded)
+    ]
+    out["n_words"] = q.str.split().str.len()
+    out["n_mod_words"] = out["modifier"].str.split().str.len().fillna(0).astype(int)
+
+    mod_tokens = out["modifier"].str.split()
+    out["market_tag"] = [
+        _market_tag(t) if isinstance(t, list) else "" for t in mod_tokens
+    ]
+    return out
+
+
+def _modifier_position(marked: str) -> str:
+    tokens = marked.split()
+    if BRAND_TOKEN not in tokens:
+        return "n.v.t."
+    first = tokens.index(BRAND_TOKEN)
+    last = len(tokens) - 1 - tokens[::-1].index(BRAND_TOKEN)
+    before = first > 0
+    after = last < len(tokens) - 1
+    if before and after:
+        return "Rondom merk"
+    if before:
+        return "Vóór merk"
+    if after:
+        return "Na merk"
+    return "Alleen merk"
+
+
+def _market_tag(tokens: list[str]) -> str:
+    hits = [t for t in tokens if t in MARKET_TOKENS]
+    if not hits:
+        return ""
+    return "BE" if any(t.startswith(("be", "vla")) for t in hits) else "NL"
+
+
+# --------------------------------------------------------------------------- #
+# Themes (rule based intent)
+# --------------------------------------------------------------------------- #
+def parse_themes(text: str) -> dict[str, set[str]]:
+    """Parse ``Thema: woord, woord`` lines into an ordered dict."""
+    themes = {}
+    for line in text.splitlines():
+        if ":" not in line:
+            continue
+        name, words = line.split(":", 1)
+        tokens = {w.strip().lower() for w in words.split(",") if w.strip()}
+        if name.strip() and tokens:
+            themes[name.strip()] = tokens
+    return themes
+
+
+def themes_to_text(themes: dict[str, str]) -> str:
+    return "\n".join(f"{k}: {v}" for k, v in themes.items())
+
+
+def assign_themes(df: pd.DataFrame, themes: dict[str, set[str]]) -> pd.Series:
+    def theme_for(modifier: str, branded: bool) -> str:
+        if not branded:
+            return "Geen merk (ruis)"
+        tokens = modifier.split()
+        if not tokens:
+            return THEME_PURE
+        token_set = set(tokens)
+        for name, words in themes.items():
+            if token_set & words:
+                return name
+        if token_set <= MARKET_TOKENS:
+            return THEME_MARKET
+        return THEME_PRODUCT
+
+    return pd.Series(
+        [theme_for(m, b) for m, b in zip(df["modifier"], df["is_branded"])],
+        index=df.index,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# N-grams
+# --------------------------------------------------------------------------- #
+def _ngrams(tokens: list[str], n: int) -> list[str]:
+    return [" ".join(tokens[i:i + n]) for i in range(len(tokens) - n + 1)]
+
+
+def query_ngrams(df: pd.DataFrame, n: int, column: str = "modifier",
+                 drop_stopwords: bool = False, drop_market: bool = False) -> pd.DataFrame:
+    """Long table (row index, ngram), unique per query."""
+    rows, grams = [], []
+    for idx, text in zip(df.index, df[column]):
+        if not text:
+            continue
+        tokens = text.split()
+        if drop_stopwords:
+            tokens = [t for t in tokens if t not in STOPWORDS]
+        if drop_market:
+            tokens = [t for t in tokens if t not in MARKET_TOKENS]
+        for g in set(_ngrams(tokens, n)):
+            rows.append(idx)
+            grams.append(g)
+    return pd.DataFrame({"row": rows, "ngram": grams})
+
+
+def ngram_table(df: pd.DataFrame, n: int, markets: list[str], column: str = "modifier",
+                drop_stopwords: bool = False, drop_market: bool = False) -> pd.DataFrame:
+    """Aggregate clicks/impressions/queries per n-gram (each query counted once)."""
+    long = query_ngrams(df, n, column, drop_stopwords, drop_market)
+    if long.empty:
+        return pd.DataFrame(columns=["ngram", "queries", "clicks", "impressions", "ctr"])
+    metric_cols = ["clicks", "impressions"] + [f"clicks_{m}" for m in markets]
+    joined = long.join(df[metric_cols], on="row")
+    agg = joined.groupby("ngram").agg(
+        queries=("row", "size"), **{c: (c, "sum") for c in metric_cols}
+    ).reset_index()
+    agg["ctr"] = np.where(agg["impressions"] > 0, agg["clicks"] / agg["impressions"] * 100, 0.0)
+    total_clicks = df["clicks"].sum()
+    agg["click_share"] = agg["clicks"] / total_clicks * 100 if total_clicks else 0.0
+    agg["clicks_per_query"] = agg["clicks"] / agg["queries"]
+    return agg.sort_values("clicks", ascending=False, ignore_index=True)
+
+
+# --------------------------------------------------------------------------- #
+# Clustering
+# --------------------------------------------------------------------------- #
+def head_term_clusters(df: pd.DataFrame, metric: str = "clicks", min_queries: int = 5,
+                       use_bigrams: bool = True) -> pd.Series:
+    """Greedy n-gram grouping.
+
+    Every candidate head term (uni- and optionally bigram, stopwords and
+    market words removed) is ranked by total ``metric``. Each query joins the
+    highest ranked head term it contains, so volume concentrates on the terms
+    that actually carry it.
+    """
+    parts = [query_ngrams(df, 1, drop_stopwords=True, drop_market=True)]
+    if use_bigrams:
+        parts.append(query_ngrams(df, 2, drop_stopwords=True, drop_market=True))
+    long = pd.concat(parts, ignore_index=True)
+    if long.empty:
+        return pd.Series("(geen)", index=df.index)
+
+    joined = long.join(df[[metric]], on="row")
+    stats = joined.groupby("ngram").agg(queries=("row", "size"), vol=(metric, "sum"))
+    stats = stats[(stats["queries"] >= min_queries) & ~stats.index.str.fullmatch(r"[\d.,]+")]
+    # A bigram only wins over its parts when it carries most of their volume.
+    if use_bigrams:
+        uni_vol = stats["vol"].to_dict()
+        def bigram_ok(g):
+            words = g.split()
+            if len(words) == 1:
+                return True
+            return stats.at[g, "vol"] >= 0.5 * max(uni_vol.get(w, 0) for w in words)
+        stats = stats[[bigram_ok(g) for g in stats.index]]
+
+    stats["rank"] = stats["vol"].rank(ascending=False, method="first")
+    ranked = long.join(stats["rank"], on="ngram", how="inner")
+    # A dominant bigram is the more specific label, so it goes before any unigram.
+    ranked["words"] = ranked["ngram"].str.count(" ") + 1
+    best = (ranked.sort_values(["words", "rank"], ascending=[False, True])
+            .drop_duplicates("row").set_index("row")["ngram"])
+
+    result = pd.Series("(overig)", index=df.index, dtype=object)
+    result.loc[best.index] = best
+    result[df["modifier"].eq("")] = "(puur merk)"
+    result[~df["is_branded"]] = "(ruis)"
+    return result
+
+
+def semantic_clusters(df: pd.DataFrame, k: int = 20, top_n: int = 3000,
+                      seed: int = 42) -> pd.DataFrame:
+    """TF-IDF (words + character n-grams) + KMeans on the top modifiers.
+
+    Character n-grams make typos and inflections ("retourneren", "retour")
+    land together. Returns one row per modifier with cluster, label and 2D
+    coordinates for a map.
+    """
+    from scipy.sparse import hstack
+    from sklearn.cluster import KMeans
+    from sklearn.decomposition import TruncatedSVD
+    from sklearn.feature_extraction.text import TfidfVectorizer
+
+    mods = (
+        df[df["modifier"].ne("")]
+        .groupby("modifier", as_index=False)[["clicks", "impressions"]].sum()
+        .sort_values("clicks", ascending=False)
+        .head(top_n)
+        .reset_index(drop=True)
+    )
+    if len(mods) < k * 2:
+        k = max(2, len(mods) // 2)
+    if len(mods) < 4:
+        return pd.DataFrame()
+
+    drop = STOPWORDS | MARKET_TOKENS
+    text = mods["modifier"].map(lambda m: " ".join(t for t in m.split() if t not in drop) or m)
+    words = TfidfVectorizer(analyzer="word", token_pattern=r"[^\s]+", sublinear_tf=True)
+    chars = TfidfVectorizer(analyzer="char_wb", ngram_range=(3, 5), sublinear_tf=True, min_df=2)
+    # Words carry the meaning; character n-grams only pull typos together.
+    X = hstack([words.fit_transform(text), 0.5 * chars.fit_transform(text)]).tocsr()
+
+    n_comp = min(100, X.shape[1] - 1, len(mods) - 1)
+    reduced = TruncatedSVD(n_components=n_comp, random_state=seed).fit_transform(X)
+    norms = np.linalg.norm(reduced, axis=1, keepdims=True)
+    reduced = reduced / np.where(norms == 0, 1, norms)
+
+    km = KMeans(n_clusters=k, n_init=10, random_state=seed)
+    mods["cluster"] = km.fit_predict(reduced, sample_weight=np.log1p(mods["clicks"]) + 1)
+
+    coords = TruncatedSVD(n_components=2, random_state=seed).fit_transform(reduced)
+    mods["x"], mods["y"] = coords[:, 0], coords[:, 1]
+
+    labels = {}
+    for c, grp in mods.groupby("cluster"):
+        tok = (
+            grp.assign(tok=grp["modifier"].str.split()).explode("tok")
+            .query("tok not in @STOPWORDS")
+            .groupby("tok")["clicks"].sum().sort_values(ascending=False)
+        )
+        labels[c] = " · ".join(tok.head(3).index) or f"cluster {c}"
+    mods["label"] = mods["cluster"].map(labels)
+    return mods
+
+
+# --------------------------------------------------------------------------- #
+# Other views
+# --------------------------------------------------------------------------- #
+def pareto(df: pd.DataFrame, metric: str = "clicks") -> pd.DataFrame:
+    s = df[metric].sort_values(ascending=False).reset_index(drop=True)
+    total = s.sum()
+    out = pd.DataFrame({
+        "rank": np.arange(1, len(s) + 1),
+        "cum_share": s.cumsum() / total * 100 if total else 0.0,
+    })
+    out["query_share"] = out["rank"] / len(out) * 100
+    return out
+
+
+def queries_for_share(df: pd.DataFrame, share: float, metric: str = "clicks") -> int:
+    p = pareto(df, metric)
+    hit = p[p["cum_share"] >= share]
+    return int(hit["rank"].iloc[0]) if len(hit) else len(p)
+
+
+def cooccurrence(df: pd.DataFrame, top_k: int = 25, metric: str = "clicks") -> pd.DataFrame:
+    """Square matrix: total ``metric`` of queries that contain both tokens."""
+    long = query_ngrams(df, 1, drop_stopwords=True)
+    if long.empty:
+        return pd.DataFrame()
+    joined = long.join(df[[metric]], on="row")
+    top = joined.groupby("ngram")[metric].sum().nlargest(top_k).index
+    sub = joined[joined["ngram"].isin(top)]
+    pairs = sub.merge(sub, on="row", suffixes=("_a", "_b"))
+    mat = pairs.pivot_table(index="ngram_a", columns="ngram_b", values=f"{metric}_a",
+                            aggfunc="sum", fill_value=0)
+    mat = mat.reindex(index=top, columns=top, fill_value=0).astype(float)
+    values = mat.to_numpy(copy=True)
+    np.fill_diagonal(values, 0)
+    mat = pd.DataFrame(values, index=list(mat.index), columns=list(mat.columns))
+    return mat
+
+
+def word_context(df: pd.DataFrame, term: str, metric: str = "clicks") -> pd.DataFrame:
+    """Left and right neighbour of ``term`` (one word or phrase) in the marked query."""
+    term_tokens = term.lower().split()
+    n = len(term_tokens)
+    rows = []
+    for text, value in zip(df["marked"], df[metric]):
+        tokens = text.split()
+        for i in range(len(tokens) - n + 1):
+            if tokens[i:i + n] == term_tokens:
+                left = tokens[i - 1] if i > 0 else "‹begin›"
+                right = tokens[i + n] if i + n < len(tokens) else "‹einde›"
+                rows.append((left, right, value))
+                break
+    return pd.DataFrame(rows, columns=["left", "right", "value"])
+
+
+def opportunity_table(ngrams: pd.DataFrame, min_impressions: float) -> pd.DataFrame:
+    """N-grams with many impressions but a CTR below the median of comparable terms."""
+    pool = ngrams[ngrams["impressions"] >= min_impressions].copy()
+    if pool.empty:
+        return pool
+    median_ctr = pool["ctr"].median()
+    pool["ctr_gap"] = median_ctr - pool["ctr"]
+    pool["missed_clicks"] = (pool["ctr_gap"].clip(lower=0) / 100 * pool["impressions"]).round()
+    return pool[pool["ctr_gap"] > 0].sort_values("missed_clicks", ascending=False)
+
+
+def near_brand_tokens(df: pd.DataFrame, brands: list[str]) -> pd.DataFrame:
+    """Tokens in non-branded queries that contain a brand string: typo candidates."""
+    noise = df[~df["is_branded"]]
+    if noise.empty or not brands:
+        return pd.DataFrame(columns=["token", "queries", "clicks", "impressions", "ctr"])
+    alt = "|".join(re.escape(b.lower()) for b in brands if b.strip())
+    exploded = noise.assign(token=noise["query"].str.split()).explode("token")
+    exploded = exploded[exploded["token"].str.contains(alt, na=False)]
+    agg = exploded.groupby("token").agg(
+        queries=("query", "size"), clicks=("clicks", "sum"), impressions=("impressions", "sum")
+    ).reset_index()
+    agg["ctr"] = np.where(agg["impressions"] > 0, agg["clicks"] / agg["impressions"] * 100, 0.0)
+    return agg.sort_values("clicks", ascending=False, ignore_index=True)

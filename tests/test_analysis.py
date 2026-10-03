@@ -1,0 +1,121 @@
+import pandas as pd
+import pytest
+
+import analysis as an
+
+
+@pytest.fixture
+def df():
+    raw = pd.DataFrame(
+        {
+            "query": [
+                "acme",
+                "acme.com",
+                "acme com inloggen",
+                "klantenservice acme",
+                "lego acme be",
+                "acmetool",
+                "acmee",
+                "www.acme.com/sale",
+                "acme,vom",
+            ],
+            "clicks": [1000, 500, 100, 80, 20, 5, 30, 10, 3],
+            "impressions": [10000, 6000, 2000, 1000, 800, 900, 300, 200, 50],
+        }
+    )
+    return an.split_brand(raw, ["acme"], ["acmee"])
+
+
+@pytest.mark.parametrize(
+    "query,expected",
+    [
+        ("acme", "acme"),
+        ("acme.com", "acme.com"),
+        ("acme com", "acme com"),
+        ("acmecom", "acmecom"),
+        ("acme-com", "acme-com"),
+        ("https://www.acme.com", "https://www.acme.com"),
+        ("acme.be", "acme.be"),
+        ("acme.con", "acme.con"),
+        ("acme.", "acme."),
+        ("acme be", "acme"),
+    ],
+)
+def test_brand_pattern_variants(query, expected):
+    assert an.brand_pattern(["acme"]).search(query).group(0) == expected
+
+
+@pytest.mark.parametrize("query", ["acmetool", "acmes", "subacme", "my-acme-x"])
+def test_brand_pattern_ignores_substrings(query):
+    assert an.brand_pattern(["acme"]).search(query) is None
+
+
+def test_split_types(df):
+    t = dict(zip(df["query"], df["query_type"]))
+    assert t["acme"] == "Puur merk"
+    assert t["acme.com"] == "Puur merk"
+    assert t["acme com inloggen"] == "Merk + modifier"
+    assert t["acmetool"] == "Geen merk (ruis)"
+    assert t["acmee"] == "Typo puur"
+    assert t["acme,vom"] == "Puur merk"
+
+
+def test_modifier_and_position(df):
+    row = df.set_index("query")
+    assert row.at["acme com inloggen", "modifier"] == "inloggen"
+    assert row.at["acme com inloggen", "position"] == "Na merk"
+    assert row.at["klantenservice acme", "position"] == "Vóór merk"
+    assert row.at["lego acme be", "position"] == "Rondom merk"
+    assert row.at["lego acme be", "market_tag"] == "BE"
+    assert row.at["www.acme.com/sale", "modifier"] == "sale"
+
+
+def test_themes(df):
+    themes = an.parse_themes(an.themes_to_text(an.DEFAULT_THEMES))
+    th = dict(zip(df["query"], an.assign_themes(df, themes)))
+    assert th["acme"] == an.THEME_PURE
+    assert th["acme com inloggen"] == "Inloggen & account"
+    assert th["klantenservice acme"] == "Klantenservice & contact"
+    assert th["lego acme be"] == an.THEME_PRODUCT
+    assert th["acmetool"] == "Geen merk (ruis)"
+
+
+def test_ngram_counts_each_query_once():
+    raw = pd.DataFrame({"query": ["acme saldo saldo"], "clicks": [10], "impressions": [100]})
+    d = an.split_brand(raw, ["acme"], [])
+    ng = an.ngram_table(d, 1, []).set_index("ngram")
+    assert ng.at["saldo", "queries"] == 1
+    assert ng.at["saldo", "clicks"] == 10
+    assert ng.at["saldo", "ctr"] == pytest.approx(10.0)
+
+
+def test_head_term_clusters_follow_volume():
+    raw = pd.DataFrame(
+        {
+            "query": [f"acme cadeaukaart saldo {i}" for i in range(5)] + [f"acme saldo x{i}" for i in range(5)],
+            "clicks": [100] * 5 + [1] * 5,
+            "impressions": [1000] * 10,
+        }
+    )
+    d = an.split_brand(raw, ["acme"], [])
+    clusters = an.head_term_clusters(d, "clicks", min_queries=5)
+    # "cadeaukaart saldo" carries most of the volume of both words, so it wins as a bigram
+    assert set(clusters[:5]) == {"cadeaukaart saldo"}
+    assert set(clusters[5:]) == {"saldo"}
+
+
+def test_load_queries_detects_markets(tmp_path):
+    p = tmp_path / "q.csv"
+    p.write_text(
+        "query,clicks_nl,clicks_nl_formatted,clicks_be,total_clicks,total_impressions\n"
+        'Acme,10,"10",5,15,100\nacme ,1,"1",0,1,10\n'
+    )
+    df, markets = an.load_queries(p)
+    assert markets == ["nl", "be"]
+    assert len(df) == 1  # case/whitespace duplicates are merged
+    assert df["clicks"].iloc[0] == 16
+
+
+def test_near_brand_tokens(df):
+    nb = an.near_brand_tokens(df, ["acme"])
+    assert "acmetool" in nb["token"].tolist()

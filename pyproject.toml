@@ -1,0 +1,21 @@
+[project]
+name = "brandtermsplit"
+version = "0.1.0"
+description = "Streamlit app that splits branded search queries into brand, modifier and noise, and analyses the n-grams."
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+# pandas columns zipped together always have equal length
+ignore = ["B905"]
+
+[tool.ruff.lint.per-file-ignores]
+# theme keyword lists read better on one line each
+"analysis.py" = ["E501"]

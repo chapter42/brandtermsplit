@@ -1,0 +1,11 @@
+# Client exports and generated data never go in the repo
+*.csv
+*.xlsx
+!tests/fixtures/*.csv
+
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.venv/
+.env
+.DS_Store
