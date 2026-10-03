@@ -427,15 +427,15 @@ def word_context(df: pd.DataFrame, term: str, metric: str = "clicks") -> pd.Data
     term_tokens = term.lower().split()
     n = len(term_tokens)
     rows = []
-    for text, value in zip(df["marked"], df[metric]):
+    for idx, text, value in zip(df.index, df["marked"], df[metric]):
         tokens = text.split()
         for i in range(len(tokens) - n + 1):
             if tokens[i:i + n] == term_tokens:
                 left = tokens[i - 1] if i > 0 else "‹begin›"
                 right = tokens[i + n] if i + n < len(tokens) else "‹einde›"
-                rows.append((left, right, value))
+                rows.append((idx, left, right, value))
                 break
-    return pd.DataFrame(rows, columns=["left", "right", "value"])
+    return pd.DataFrame(rows, columns=["row", "left", "right", "value"])
 
 
 def opportunity_table(ngrams: pd.DataFrame, min_impressions: float) -> pd.DataFrame:

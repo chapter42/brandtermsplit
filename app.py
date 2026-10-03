@@ -76,6 +76,53 @@ NGRAM_COLUMNS = {
 }
 
 
+def selected_points(event) -> list[dict]:
+    """Points from a plotly_chart selection event (click, box or lasso)."""
+    try:
+        return list(event.selection.points)
+    except AttributeError:
+        return []
+
+
+def selection_table(df, metric, label, empty_hint=None, key=None):
+    """Summary + query table + top words for a selected subset."""
+    if df.empty:
+        if empty_hint:
+            st.caption(empty_hint)
+        return
+    clicks, impr = df["clicks"].sum(), df["impressions"].sum()
+    st.markdown(
+        f"**{label}** · {nl(len(df))} zoektermen · {nl(clicks)} klikken · "
+        f"{nl(impr)} vertoningen · CTR {nl(clicks / impr * 100 if impr else 0, 2)}%"
+    )
+    c1, c2 = st.columns([3, 1])
+    table = df.sort_values(metric, ascending=False).assign(ctr=lambda d: d["clicks"] / d["impressions"] * 100)
+    cols = [c for c in ["query", "theme", "cluster", "clicks", "impressions", "ctr"] if c in table.columns]
+    c1.dataframe(
+        table[cols],
+        column_config={
+            "query": "Zoekterm",
+            "theme": "Thema",
+            "cluster": "Kopterm",
+            "clicks": num_col("Klikken"),
+            "impressions": num_col("Vertoningen"),
+            "ctr": st.column_config.NumberColumn("CTR %", format="%.2f"),
+        },
+        hide_index=True,
+        width="stretch",
+        height=380,
+        key=key,
+    )
+    words = an.ngram_table(df, 1, [], drop_stopwords=True).head(25)
+    c2.dataframe(
+        words[["ngram", metric]],
+        column_config={"ngram": "Woord in selectie", metric: num_col(METRIC_LABELS[metric])},
+        hide_index=True,
+        width="stretch",
+        height=380,
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Cached computation
 # --------------------------------------------------------------------------- #
@@ -96,6 +143,11 @@ def prepare(df, brands, typos, theme_text):
 @st.cache_data(show_spinner="N-grammen tellen…")
 def ngrams(df, n, markets, column, drop_stop, drop_market):
     return an.ngram_table(df, n, list(markets), column, drop_stop, drop_market)
+
+
+@st.cache_data(show_spinner=False)
+def query_ngram_rows(df, n, column, drop_stop, drop_market):
+    return an.query_ngrams(df, n, column, drop_stop, drop_market)
 
 
 @st.cache_data(show_spinner="Clusteren op kopterm…")
@@ -171,14 +223,28 @@ if not brand_list:
 data = prepare(raw, brand_list, typo_list, theme_text)
 markets = tuple(markets)
 
-theme_options = sorted(data["theme"].unique())
+theme_options = sorted(t for t in data["theme"].unique() if t != "Geen merk (ruis)")
 with st.sidebar:
-    themes_sel = st.multiselect("Thema's", theme_options, default=[], placeholder="Alle thema's")
+    only_products = st.toggle(
+        "🎯 Alleen product-zoektermen",
+        value=False,
+        help=f"Toont alleen **{an.THEME_PRODUCT}**: klantenservice, cadeaukaart, inloggen, puur merk en de "
+        "andere service-thema's gaan uit. Zo zie je het verband tussen merk en producten.",
+    )
+    themes_out = st.multiselect(
+        "Thema's uitsluiten",
+        [t for t in theme_options if t != an.THEME_PRODUCT],
+        default=[],
+        placeholder="Geen, alles meenemen",
+        disabled=only_products,
+    )
     min_impr = st.number_input("Min. vertoningen per zoekterm", 0, value=0, step=10)
 
 view = data if include_noise else data[data["is_branded"]]
-if themes_sel:
-    view = view[view["theme"].isin(themes_sel)]
+if only_products:
+    view = view[view["theme"].isin([an.THEME_PRODUCT, "Geen merk (ruis)"])]
+elif themes_out:
+    view = view[~view["theme"].isin(themes_out)]
 if min_impr:
     view = view[view["impressions"] >= min_impr]
 modifiers = view[view["modifier"].ne("")]
@@ -207,6 +273,13 @@ k3.metric("Vertoningen", nl_compact(total_impr))
 k4.metric("CTR", f"{nl(total_clicks / total_impr * 100, 2)}%")
 k5.metric("Puur merk", f"{nl(pure['clicks'].sum() / total_clicks * 100, 1)}%", "van de klikken", delta_color="off")
 k6.metric("Unieke modifiers", nl(data.loc[data["modifier"].ne(""), "modifier"].nunique()))
+if len(view) < len(data):
+    st.caption(
+        f"**Huidige selectie:** {nl(len(view))} zoektermen · {nl(view['clicks'].sum())} klikken "
+        f"({nl(view['clicks'].sum() / total_clicks * 100, 1)}% van alle klikken)"
+        + (" · alleen product-zoektermen" if only_products else "")
+        + (f" · zonder {', '.join(themes_out)}" if themes_out and not only_products else "")
+    )
 
 tabs = st.tabs(
     [
@@ -375,10 +448,13 @@ with tabs[1]:
             color="ctr",
             color_continuous_scale="RdBu",
             hover_data={"queries": True, "clicks": ":,.0f", "impressions": ":,.0f"},
+            custom_data=["ngram"],
             labels={"ngram": "", sort_by: {"ctr": "CTR %", **METRIC_LABELS}[sort_by], "ctr": "CTR %"},
         )
         fig.update_yaxes(autorange="reversed")
-        st.plotly_chart(style(fig, 760), width="stretch")
+        ev_bar = st.plotly_chart(
+            style(fig, 760), width="stretch", on_select="rerun", selection_mode=("points", "box"), key="ng_bar"
+        )
     with c2:
         st.markdown("**Vertoningen versus CTR**: grootte = klikken, rechtsboven = zichtbaar én geklikt")
         bub = ng_f.nlargest(80, "impressions")
@@ -392,10 +468,11 @@ with tabs[1]:
             size_max=55,
             color="clicks_per_query",
             color_continuous_scale="Viridis",
+            custom_data=["ngram"],
             labels={"impressions": "Vertoningen (log)", "ctr": "CTR %", "clicks_per_query": "Klikken/zoekterm"},
         )
         fig.update_traces(textposition="top center", textfont_size=10)
-        st.plotly_chart(style(fig, 760), width="stretch")
+        ev_bub = st.plotly_chart(style(fig, 760), width="stretch", on_select="rerun", key="ng_bubble")
 
     st.markdown("**Alle n-grammen**")
     show_cols = ["ngram", "queries", "clicks", "impressions", "ctr", "click_share", "clicks_per_query"]
@@ -403,7 +480,29 @@ with tabs[1]:
     cfg["click_share"] = st.column_config.ProgressColumn(
         "Aandeel klikken", format="%.2f%%", min_value=0, max_value=float(ng_f["click_share"].max() or 1)
     )
-    st.dataframe(ng_f[show_cols], column_config=cfg, hide_index=True, width="stretch", height=420)
+    ev_tab = st.dataframe(
+        ng_f[show_cols],
+        column_config=cfg,
+        hide_index=True,
+        width="stretch",
+        height=420,
+        on_select="rerun",
+        selection_mode="multi-row",
+        key="ng_table",
+    )
+
+    chosen = {p["customdata"][0] for ev in (ev_bar, ev_bub) for p in selected_points(ev) if p.get("customdata")}
+    chosen |= set(ng_f[show_cols].iloc[ev_tab.selection.rows]["ngram"]) if ev_tab.selection.rows else set()
+    st.markdown("**Zoektermen in je selectie**")
+    if chosen:
+        long = query_ngram_rows(view, n or 1, source, drop_stop, drop_mkt)
+        rows = long.loc[long["ngram"].isin(chosen), "row"].unique()
+        selection_table(view.loc[rows], metric, ", ".join(sorted(chosen)[:8]), key="ng_sel_table")
+    else:
+        st.caption(
+            "Klik op een balk of bubbel (of sleep een kader / lasso, of vink rijen aan in de tabel) "
+            "om de zoektermen met die n-grammen te zien."
+        )
 
 # --------------------------------------------------------------------------- #
 # 3. Waar zit het volume
@@ -423,14 +522,9 @@ with tabs[2]:
 
     vol = view[view["modifier"].ne("")] if hide_pure else view
     vol = vol.assign(cluster=head_clusters(vol, metric, 3, True))
-    agg = (
-        vol.groupby(["theme", "cluster", "query"])
-        .agg(clicks=("clicks", "sum"), impressions=("impressions", "sum"))
-        .reset_index()
-    )
     # Products are a long tail, so that theme gets more room than the service themes.
     top_clusters = (
-        agg.groupby(["theme", "cluster"])[metric]
+        vol.groupby(["theme", "cluster"])[metric]
         .sum()
         .reset_index()
         .sort_values(metric, ascending=False)
@@ -442,36 +536,72 @@ with tabs[2]:
         (top_clusters["n"] < per_theme)
         | ((top_clusters["theme"] == an.THEME_PRODUCT) & (top_clusters["n"] < per_theme * 3))
     ]
-    agg = agg.merge(top_clusters[["theme", "cluster"]], on=["theme", "cluster"], how="left", indicator=True)
-    agg.loc[agg["_merge"] == "left_only", "cluster"] = "(overige koptermen)"
-    agg["rank"] = agg.groupby(["theme", "cluster"])[metric].rank(ascending=False, method="first")
-    agg.loc[agg["rank"] > per_cluster, "query"] = "(overige zoektermen)"
-    agg = agg.groupby(["theme", "cluster", "query"], as_index=False)[["clicks", "impressions"]].sum()
-    agg["ctr"] = agg["clicks"] / agg["impressions"].replace(0, np.nan) * 100
+    keep = set(zip(top_clusters["theme"], top_clusters["cluster"]))
+    # Display labels per query, so a click on any block maps back to the underlying queries.
+    vol["cluster_disp"] = [c if (t, c) in keep else "(overige koptermen)" for t, c in zip(vol["theme"], vol["cluster"])]
+    rank = vol.groupby(["theme", "cluster_disp"])[metric].rank(ascending=False, method="first")
+    vol["query_disp"] = vol["query"].where(rank <= per_cluster, "(overige zoektermen)")
+    agg = vol.groupby(["theme", "cluster_disp", "query_disp"], as_index=False)[["clicks", "impressions"]].sum()
     agg = agg[agg[metric] > 0]
 
-    path = [px.Constant("Alle zoektermen"), "theme", "cluster"] + (["query"] if per_cluster else [])
-    kwargs = dict(path=path, values=metric, color="theme", color_discrete_sequence=THEME_COLORS)
+    root = "Alle zoektermen"
+    levels = ["theme", "cluster_disp"] + (["query_disp"] if per_cluster else [])
+    path = [px.Constant(root)] + levels
     chart = {"Treemap": px.treemap, "Sunburst": px.sunburst, "Icicle": px.icicle}[chart_type or "Treemap"]
-    fig = chart(agg, **kwargs)
+    fig = chart(agg, path=path, values=metric, color="theme", color_discrete_sequence=THEME_COLORS)
     fig.update_traces(
         textinfo="label+value+percent root" if chart_type != "Sunburst" else "label+percent root",
         hovertemplate="<b>%{label}</b><br>" + M + ": %{value:,.0f}<br>%{percentRoot:.1%} van totaal"
         "<br>%{percentParent:.1%} van %{parent}<extra></extra>",
     )
-    st.plotly_chart(style(fig, 720), width="stretch")
+    event = st.plotly_chart(
+        style(fig, 720), width="stretch", on_select="rerun", selection_mode="points", key=f"vol_{chart_type}"
+    )
+
+    # Plotly ids are "root/theme/cluster/query"; labels may contain "/", so look ids up instead of splitting.
+    id_map = {root: {}}
+    for row in agg[levels].itertuples(index=False):
+        parts = [root]
+        for value in row:
+            parts.append(value)
+            id_map["/".join(parts)] = dict(zip(levels, row[: len(parts) - 1]))
+    picked = [id_map[p["id"]] for p in selected_points(event) if p.get("id") in id_map]
+    if picked:
+        mask = pd.Series(False, index=vol.index)
+        for cond in picked:
+            m = pd.Series(True, index=vol.index)
+            for col, value in cond.items():
+                m &= vol[col] == value
+            mask |= m
+        sel = vol[mask]
+        label = " / ".join(picked[0].values()) or root
+    else:
+        sel = vol
+        label = "Hele grafiek"
+    st.caption("Klik op een blok om de zoektermen in die selectie te zien. Klik op de bovenste balk om terug te gaan.")
+    selection_table(sel, metric, label, key="vol_table")
 
     st.markdown("**Stroom: positie van de modifier → thema → markt-signaal**")
-    flow = view[view["position"].ne("n.v.t.")].assign(markt=lambda d: d["market_tag"].replace("", "geen landwoord"))
-    flow = flow.groupby(["position", "theme", "markt"])[metric].sum().reset_index()
-    levels = ["position", "theme", "markt"]
+    flow_base = view[view["position"].ne("n.v.t.")].assign(
+        markt=lambda d: d["market_tag"].replace("", "geen landwoord")
+    )
+    st.caption("Een Sankey is niet aanklikbaar; filter de stroom met de keuzes hieronder.")
+    f1, f2, f3 = st.columns(3)
+    pos_sel = f1.multiselect("Positie", sorted(flow_base["position"].unique()), placeholder="Alle posities")
+    theme_sel = f2.multiselect("Thema", sorted(flow_base["theme"].unique()), placeholder="Alle thema's")
+    mkt_sel = f3.multiselect("Markt-signaal", sorted(flow_base["markt"].unique()), placeholder="Alle")
+    for col, chosen in (("position", pos_sel), ("theme", theme_sel), ("markt", mkt_sel)):
+        if chosen:
+            flow_base = flow_base[flow_base[col].isin(chosen)]
+    flow = flow_base.groupby(["position", "theme", "markt"])[metric].sum().reset_index()
+    flow_levels = ["position", "theme", "markt"]
     labels, index = [], {}
-    for lvl in levels:
+    for lvl in flow_levels:
         for v in flow[lvl].unique():
             index[(lvl, v)] = len(labels)
             labels.append(v)
     src, tgt, val = [], [], []
-    for a, b in zip(levels, levels[1:]):
+    for a, b in zip(flow_levels, flow_levels[1:]):
         link = flow.groupby([a, b])[metric].sum().reset_index()
         src += [index[(a, x)] for x in link[a]]
         tgt += [index[(b, x)] for x in link[b]]
@@ -484,6 +614,8 @@ with tabs[2]:
         )
     )
     st.plotly_chart(style(fig, 560), width="stretch")
+    if pos_sel or theme_sel or mkt_sel:
+        selection_table(flow_base, metric, "Selectie in de stroom", key="flow_table")
 
     st.markdown("**Thema's in cijfers**")
     th = (
@@ -544,41 +676,23 @@ with tabs[3]:
             f"De rest valt onder *(overig)*: termen die te zeldzaam zijn om een eigen cluster te vormen."
         )
 
-        c1, c2 = st.columns([3, 2])
-        with c1:
-            top_c = stats[stats["cluster"] != "(overig)"].head(40)
-            fig = px.scatter(
-                top_c,
-                x="queries",
-                y="ctr",
-                size=metric,
-                color="theme",
-                text="cluster",
-                log_x=True,
-                size_max=70,
-                color_discrete_sequence=THEME_COLORS,
-                labels={"queries": "Aantal zoektermen in cluster (log)", "ctr": "CTR %", "theme": ""},
-            )
-            fig.update_traces(textposition="middle center", textfont_size=11)
-            st.plotly_chart(style(fig, 620), width="stretch")
-        with c2:
-            pick = st.selectbox("Bekijk cluster", stats["cluster"].tolist())
-            members = cl[cl["cluster"] == pick].sort_values(metric, ascending=False)
-            st.dataframe(
-                members[["query", "clicks", "impressions"]].assign(
-                    ctr=members["clicks"] / members["impressions"] * 100
-                ),
-                column_config={
-                    "query": "Zoekterm",
-                    "clicks": num_col("Klikken"),
-                    "impressions": num_col("Vertoningen"),
-                    "ctr": st.column_config.NumberColumn("CTR %", format="%.2f"),
-                },
-                hide_index=True,
-                width="stretch",
-                height=560,
-            )
-        st.dataframe(
+        top_c = stats[stats["cluster"] != "(overig)"].head(40)
+        fig = px.scatter(
+            top_c,
+            x="queries",
+            y="ctr",
+            size=metric,
+            color="theme",
+            text="cluster",
+            log_x=True,
+            size_max=70,
+            custom_data=["cluster"],
+            color_discrete_sequence=THEME_COLORS,
+            labels={"queries": "Aantal zoektermen in cluster (log)", "ctr": "CTR %", "theme": ""},
+        )
+        fig.update_traces(textposition="middle center", textfont_size=11)
+        ev_cl = st.plotly_chart(style(fig, 620), width="stretch", on_select="rerun", key="cl_bubble")
+        ev_cl_tab = st.dataframe(
             stats.rename(columns={"cluster": "ngram"}),
             column_config={
                 **NGRAM_COLUMNS,
@@ -591,7 +705,18 @@ with tabs[3]:
             hide_index=True,
             width="stretch",
             height=400,
+            on_select="rerun",
+            selection_mode="multi-row",
+            key="cl_table",
         )
+        picked = {p["customdata"][0] for p in selected_points(ev_cl) if p.get("customdata")}
+        if ev_cl_tab.selection.rows:
+            picked |= set(stats.iloc[ev_cl_tab.selection.rows]["cluster"])
+        st.markdown("**Zoektermen in je selectie**")
+        if picked:
+            selection_table(cl[cl["cluster"].isin(picked)], metric, ", ".join(sorted(picked)[:8]), key="cl_sel")
+        else:
+            st.caption("Klik op bubbels (of sleep een kader / lasso) of vink rijen in de tabel aan.")
     else:
         st.caption(
             "Modifiers worden omgezet naar TF-IDF-vectoren (woorden + lettergroepen, zodat typo's "
@@ -615,13 +740,15 @@ with tabs[3]:
                 size_max=18,
                 hover_name="modifier",
                 hover_data={"clicks": ":,.0f", "x": False, "y": False},
+                custom_data=["modifier"],
                 color_discrete_sequence=px.colors.qualitative.Alphabet,
             )
             fig.update_xaxes(visible=False)
             fig.update_yaxes(visible=False)
-            fig.update_layout(legend=dict(orientation="v", x=1.02, y=1, font_size=11))
-            st.plotly_chart(style(fig, 640), width="stretch")
-            fig.update_layout(legend=dict(orientation="v"))
+            fig.update_layout(legend=dict(orientation="v", x=1.02, y=1, font_size=11), dragmode="lasso")
+            ev_map = st.plotly_chart(
+                style(fig, 640), width="stretch", on_select="rerun", selection_mode=("lasso", "box"), key="sem_map"
+            )
             sstats = (
                 sc.groupby("label")
                 .agg(
@@ -641,7 +768,20 @@ with tabs[3]:
                 color_continuous_scale="RdBu",
                 hover_data={"voorbeelden": True},
             )
-            st.plotly_chart(style(fig, 520), width="stretch")
+            ev_sem = st.plotly_chart(
+                style(fig, 520), width="stretch", on_select="rerun", selection_mode="points", key="sem_tree"
+            )
+            mods_sel = {p["customdata"][0] for p in selected_points(ev_map) if p.get("customdata")}
+            labels_sel = {p["label"] for p in selected_points(ev_sem) if p.get("label") in set(sstats["label"])}
+            mods_sel |= set(sc.loc[sc["label"].isin(labels_sel), "modifier"])
+            st.markdown("**Zoektermen in je selectie**")
+            if mods_sel:
+                sel_label = (
+                    ", ".join(sorted(labels_sel)) if labels_sel else f"{nl(len(mods_sel))} modifiers uit de kaart"
+                )
+                selection_table(view[view["modifier"].isin(mods_sel)], metric, sel_label, key="sem_sel")
+            else:
+                st.caption("Sleep een lasso of kader over de clusterkaart, of klik op een blok in de treemap.")
             st.dataframe(
                 sstats.sort_values("clicks", ascending=False),
                 column_config={
@@ -705,30 +845,41 @@ with tabs[4]:
 
         pairs = ctx.groupby(["left", "right"])["value"].sum().reset_index().nlargest(20, "value")
         pairs["patroon"] = pairs["left"] + " · " + term + " · " + pairs["right"]
-        c1, c2 = st.columns(2)
+        st.caption("De Sankey is niet aanklikbaar; kies hieronder een buurwoord of vink patronen aan.")
+        f1, f2 = st.columns(2)
+        left_opts = ctx.groupby("left")["value"].sum().sort_values(ascending=False).index.tolist()
+        right_opts = ctx.groupby("right")["value"].sum().sort_values(ascending=False).index.tolist()
+        left_pick = f1.multiselect("Woord ervoor", left_opts, placeholder="Alle")
+        right_pick = f2.multiselect("Woord erna", right_opts, placeholder="Alle")
+        c1, c2 = st.columns([1, 2])
         with c1:
             st.markdown("**Meest voorkomende patronen**")
-            st.dataframe(
+            ev_pat = st.dataframe(
                 pairs[["patroon", "value"]],
                 column_config={"patroon": "Patroon", "value": num_col(M)},
                 hide_index=True,
                 width="stretch",
                 height=420,
+                on_select="rerun",
+                selection_mode="multi-row",
+                key="ctx_patterns",
             )
+        sel_ctx = ctx
+        if left_pick:
+            sel_ctx = sel_ctx[sel_ctx["left"].isin(left_pick)]
+        if right_pick:
+            sel_ctx = sel_ctx[sel_ctx["right"].isin(right_pick)]
+        if ev_pat.selection.rows:
+            chosen_pairs = pairs.iloc[ev_pat.selection.rows][["left", "right"]]
+            sel_ctx = sel_ctx.merge(chosen_pairs, on=["left", "right"])
+        parts = [", ".join(left_pick) or "…", term, ", ".join(right_pick) or "…"]
+        label = (
+            "Patronen: " + "; ".join(pairs.iloc[ev_pat.selection.rows]["patroon"])
+            if ev_pat.selection.rows
+            else (" · ".join(parts))
+        )
         with c2:
-            st.markdown("**Zoektermen**")
-            st.dataframe(
-                hits.sort_values(metric, ascending=False)[["query", "clicks", "impressions", "theme"]],
-                column_config={
-                    "query": "Zoekterm",
-                    "clicks": num_col("Klikken"),
-                    "impressions": num_col("Vertoningen"),
-                    "theme": "Thema",
-                },
-                hide_index=True,
-                width="stretch",
-                height=420,
-            )
+            selection_table(view.loc[sel_ctx["row"].unique()], metric, label, key="ctx_sel")
 
 # --------------------------------------------------------------------------- #
 # 6. Samenhang

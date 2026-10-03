@@ -19,6 +19,17 @@
 - Head-term clustering let a unigram beat a dominant bigram; dominant bigrams now win.
 - Brand is no longer hardcoded (public repo): the user enters it, defaults are empty.
 
+**Round 2 (same day)**
+- Sidebar focus filter: "Alleen product-zoektermen" switches off all service themes and pure brand;
+  "Thema's uitsluiten" removes individual themes. A caption under the KPIs shows the share of the selection.
+- Click-to-table: treemap/sunburst/icicle blocks, n-gram bars and bubbles, cluster bubbles, the semantic
+  map (lasso/box) and table rows all feed a shared selection table (queries + top words).
+- Sankeys are not clickable in Streamlit (plotly click events only come through for treemap/scatter-like
+  traces), so they get filter dropdowns that narrow both the flow and the table.
+- AppTest quirk: changing a widget's options between reruns in one AppTest session raises a KeyError;
+  test scenarios each in a fresh AppTest.
+
 **Next**
+- Numbers in tables use the browser locale (`format="localized"`); a Dutch browser shows 1.000, an English one 1,000.
 - Optional: average position column support, so *Kansen* can separate ranking from snippet problems.
 - Optional: TypeSafe intent classification as an opt-in alternative to keyword themes.
