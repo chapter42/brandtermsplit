@@ -109,13 +109,16 @@ def brand_pattern(brands: list[str]) -> re.Pattern:
 
     ``acme`` matches acme, acme.com, acme com, acmecom, acme-com, www.acme.com,
     acme.nl, acme. be, https://www.acme.com, ... but not acmes or acmetool.
+    A multi-word brand also matches glued or hyphenated, and a subdomain in
+    front (help.acme.com) is allowed.
     """
     terms = sorted({b.strip().lower() for b in brands if b.strip()}, key=len, reverse=True)
     if not terms:
         terms = ["\u0000"]  # matches nothing
-    alt = "|".join(re.escape(t) for t in terms)
+    # Multi-word brands also match glued or hyphenated: "centraal beheer" -> centraalbeheer, centraal-beheer.
+    alt = "|".join(re.escape(t).replace(r"\ ", r"[\s.\-]*") for t in terms)
     return re.compile(
-        rf"(?<![\w.])(?:https?://)?(?:www\s*\.\s*)?(?:{alt})"
+        rf"(?<![\w\-])(?:https?://)?(?:www\s*\.\s*)?(?:{alt})"
         rf"(?:\s*[.,;\-]?\s*(?:{TLD_TYPOS})\b|\s*[.,;\-]\s*(?:nl|be|co|om|c)\b|\s*[.,;])?(?:\.(?:nl|be)\b)?(?![\w\-])"
     )
 
@@ -147,7 +150,7 @@ def split_brand(df: pd.DataFrame, brands: list[str], typos: list[str]) -> pd.Dat
         is_branded,
         out["marked"].str.replace(BRAND_TOKEN, " ", regex=False)
         # leftovers like "/sdd" or ".nl" after the brand: drop leading punctuation
-        .str.replace(r"(?<!\S)[./,;:\-]+", " ", regex=True)
+        .str.replace(r"(?<!\S)[./,;:\-]+|[./,;:\-]+(?!\S)", " ", regex=True)
         .str.replace(r"\s+", " ", regex=True).str.strip(),
         "",
     )
@@ -488,7 +491,8 @@ def near_brand_tokens(df: pd.DataFrame, brands: list[str]) -> pd.DataFrame:
     noise = df[~df["is_branded"]]
     if noise.empty or not brands:
         return pd.DataFrame(columns=["token", "queries", "clicks", "impressions", "ctr"])
-    alt = "|".join(re.escape(b.lower()) for b in brands if b.strip())
+    forms = {f for b in brands if b.strip() for f in (b.lower().strip(), b.lower().strip().replace(" ", ""))}
+    alt = "|".join(re.escape(f) for f in sorted(forms, key=len, reverse=True))
     exploded = noise.assign(token=noise["query"].str.split()).explode("token")
     exploded = exploded[exploded["token"].str.contains(alt, na=False)]
     agg = exploded.groupby("token").agg(

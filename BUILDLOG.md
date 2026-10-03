@@ -37,6 +37,14 @@
   colour = pp vs. median, selective labels, click/box/lasso selection drives the table + underlying queries.
 - Kansen tab got an explanation of the method, how to read it and its limits (no position, overlapping n-grams).
 
+**Round 4 (same day)**
+- Tested a default GSC interface export (English headers, 1.000 rows): loads fine.
+- Multi-word brands: a space in the brand now also matches glued/hyphenated (centraal beheer ->
+  centraalbeheer, centraal-beheer); subdomains in front of the brand are allowed; trailing
+  punctuation is stripped from modifiers. Near-brand candidates also search the glued form.
+- Known loader gaps (not fixed yet): Dutch GSC headers, semicolon/tab separators, no manual
+  column mapping when detection fails.
+
 **Next**
 - Numbers in tables use the browser locale (`format="localized"`); a Dutch browser shows 1.000, an English one 1,000.
 - Optional: average position column support, so *Kansen* can separate ranking from snippet problems.

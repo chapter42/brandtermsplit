@@ -122,12 +122,14 @@ def test_near_brand_tokens(df):
 
 
 def test_ctr_deviation_against_group_median():
-    raw = pd.DataFrame({
-        "query": ["a1", "a2", "a3", "b1", "b2", "b3"],
-        "clicks": [10, 20, 30, 1, 2, 3],
-        "impressions": [100] * 6,
-        "grp": ["a"] * 3 + ["b"] * 3,
-    })
+    raw = pd.DataFrame(
+        {
+            "query": ["a1", "a2", "a3", "b1", "b2", "b3"],
+            "clicks": [10, 20, 30, 1, 2, 3],
+            "impressions": [100] * 6,
+            "grp": ["a"] * 3 + ["b"] * 3,
+        }
+    )
     queries, groups = an.ctr_deviation(raw, "grp", min_group_size=3)
     q = queries.set_index("query")
     assert q.at["a1", "group_median"] == pytest.approx(20)
@@ -145,3 +147,32 @@ def test_ctr_deviation_filters_small_groups_and_impressions():
     assert set(queries["query"]) == {"y", "z"}
     queries, _ = an.ctr_deviation(raw, "grp", min_impressions=100, min_group_size=3)
     assert queries.empty
+
+
+@pytest.mark.parametrize(
+    "query,expected",
+    [
+        ("centraalbeheer", "centraalbeheer"),
+        ("centraal-beheer inloggen", "centraal-beheer"),
+        ("www.centraalbeheer.nl/mijn", "www.centraalbeheer.nl"),
+        ("digitalekluis.centraal beheer.nl", "centraal beheer.nl"),
+    ],
+)
+def test_multiword_brand_variants(query, expected):
+    assert an.brand_pattern(["centraal beheer"]).search(query).group(0) == expected
+
+
+def test_multiword_brand_modifier_and_typo_candidates():
+    raw = pd.DataFrame(
+        {
+            "query": ["digitalekluis.centraal beheer.nl", "centraalbeheer.nl/activeren", "mijncentraalbeheer"],
+            "clicks": [5, 5, 5],
+            "impressions": [50, 50, 50],
+        }
+    )
+    d = an.split_brand(raw, ["centraal beheer"], []).set_index("query")
+    assert d.at["digitalekluis.centraal beheer.nl", "modifier"] == "digitalekluis"
+    assert d.at["centraalbeheer.nl/activeren", "modifier"] == "activeren"
+    assert not d.at["mijncentraalbeheer", "is_branded"]
+    nb = an.near_brand_tokens(d.reset_index(), ["centraal beheer"])
+    assert "mijncentraalbeheer" in nb["token"].tolist()
