@@ -29,6 +29,14 @@
 - AppTest quirk: changing a widget's options between reruns in one AppTest session raises a KeyError;
   test scenarios each in a fresh AppTest.
 
+**Round 3 (same day)**
+- Removed the market comparison tab (not useful enough).
+- New tab "CTR-afwijking": `an.ctr_deviation` compares each query with the median CTR of its group;
+  group bar (vs. overall median), box plots of the spread, outliers below/above with click delta.
+- New tab "Vertoningen vs klikken": log-log scatter with iso-CTR lines (0,5–20%) and the median line,
+  colour = pp vs. median, selective labels, click/box/lasso selection drives the table + underlying queries.
+- Kansen tab got an explanation of the method, how to read it and its limits (no position, overlapping n-grams).
+
 **Next**
 - Numbers in tables use the browser locale (`format="localized"`); a Dutch browser shows 1.000, an English one 1,000.
 - Optional: average position column support, so *Kansen* can separate ranking from snippet problems.

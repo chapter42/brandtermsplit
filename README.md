@@ -34,7 +34,8 @@ they cluster. The interface is in Dutch.
 | Clusters | Head-term bubble chart with drill-down, or semantic cluster map + treemap |
 | Woordverkenner | Pick a word: Sankey of what people type before and after it, plus the matching queries |
 | Samenhang | Co-occurrence heatmap of the top words |
-| Markten | Which words are typical for market A or B (needs `clicks_<country>` columns) |
+| CTR-afwijking | Each query vs. the median CTR of its own group (theme, head term, position, brand variant, length): group deviation, spread, missed clicks, outliers |
+| Vertoningen vs klikken | Log-log scatter of impressions vs. clicks for n-grams, head terms or queries, with iso-CTR lines and the median; selection drives the table |
 | Kansen | N-grams with many impressions but a CTR below the median, with estimated missed clicks |
 | Ruis & typo's | Words that contain the brand string without being the brand; high CTR suggests a typo |
 | Data | Enriched dataset with search and CSV download |
@@ -46,7 +47,7 @@ A CSV with at least a query column and clicks and impressions. Recognised column
 - query: `query`, `zoekterm`, `keyword`, `top queries`
 - clicks: `total_clicks`, `clicks`, `klikken`
 - impressions: `total_impressions`, `impressions`, `vertoningen`
-- optional per market: `clicks_nl`, `clicks_be`, `clicks_de`, …
+- optional per market: `clicks_nl`, `clicks_be`, `clicks_de`, … (kept in the enriched export)
 
 Upload the file in the sidebar, or drop it in the app folder and pick it from the list.
 CSV files are git-ignored so client data never ends up in the repo.

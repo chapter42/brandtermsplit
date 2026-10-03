@@ -289,7 +289,8 @@ tabs = st.tabs(
         "🧩 Clusters",
         "🌳 Woordverkenner",
         "🔗 Samenhang",
-        "🇳🇱🇧🇪 Markten",
+        "📐 CTR-afwijking",
+        "🔭 Vertoningen vs klikken",
         "🎯 Kansen",
         "🧹 Ruis & typo's",
         "📥 Data",
@@ -917,99 +918,355 @@ with tabs[5]:
         )
 
 # --------------------------------------------------------------------------- #
-# 7. Markten
+# 7. CTR-afwijking
 # --------------------------------------------------------------------------- #
 with tabs[6]:
-    st.subheader("Markten vergelijken")
-    if len(markets) < 2:
-        st.info("Voor deze tab zijn minstens twee kolommen `clicks_<land>` nodig.")
-    else:
-        c1, c2, c3 = st.columns(3)
-        ma = c1.selectbox("Markt A", markets, index=0, format_func=str.upper)
-        mb = c2.selectbox("Markt B", markets, index=1, format_func=str.upper)
-        n_mk = c3.segmented_control("N-gram ", [1, 2, 3], default=1, format_func=lambda v: f"{v}-gram")
-        ca, cb = f"clicks_{ma}", f"clicks_{mb}"
-        base_share = view[cb].sum() / max(view[ca].sum() + view[cb].sum(), 1) * 100
-        st.caption(
-            f"Over de hele selectie komt **{nl(base_share, 1)}%** van de klikken uit {mb.upper()}. "
-            f"Woorden ver boven die lijn zijn typisch {mb.upper()}, ver eronder typisch {ma.upper()}."
-        )
-        mk = ngrams(view, n_mk or 1, markets, "modifier", True, False)
-        mk = mk[(mk[ca] + mk[cb]) >= 200].copy()
-        mk["share_b"] = mk[cb] / (mk[ca] + mk[cb]) * 100
-        mk["index"] = mk["share_b"] - base_share
-        mk["total"] = mk[ca] + mk[cb]
+    st.subheader("Wijkt de CTR af van de mediaan van de groep?")
+    st.caption(
+        "Elke zoekterm wordt vergeleken met de mediaan-CTR van zijn eigen groep. Zo zie je welke groepen "
+        "structureel beter of slechter klikken, en welke zoektermen binnen een groep uit de toon vallen. "
+        "Gemiste klikken = (groepsmediaan − eigen CTR) × eigen vertoningen."
+    )
+    group_options = {
+        "theme": "Thema",
+        "cluster": "Kopterm-cluster",
+        "position": "Positie modifier",
+        "brand_variant": "Merkvariant",
+        "n_words": "Aantal woorden",
+    }
+    c1, c2, c3 = st.columns(3)
+    group_col = c1.selectbox("Groepeer op", list(group_options), index=1, format_func=group_options.get)
+    min_imp_dev = c2.number_input(
+        "Min. vertoningen per zoekterm",
+        0,
+        value=1000,
+        step=500,
+        help="CTR op kleine aantallen is vooral ruis; deze drempel geldt alleen voor deze tab.",
+    )
+    min_group = c3.slider("Min. zoektermen per groep", 3, 50, 10)
 
+    base = view.assign(cluster=head_clusters(view, metric, 5, True)) if group_col == "cluster" else view
+    if group_col == "cluster":
+        base = base[~base["cluster"].isin(["(ruis)"])]
+    dev_q, dev_g = an.ctr_deviation(base, group_col, min_imp_dev, min_group)
+    if dev_g.empty:
+        st.info("Geen groepen bij deze drempels. Verlaag de minimale vertoningen of groepsgrootte.")
+    else:
+        overall = dev_g.attrs["overall_median"]
+        dev_g["group"] = dev_g[group_col].astype(str)
+        dev_q["group"] = dev_q[group_col].astype(str)
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("Mediaan-CTR (alle zoektermen)", f"{nl(overall, 2)}%")
+        k2.metric("Groepen", nl(len(dev_g)))
+        k3.metric("Zoektermen in de vergelijking", nl(len(dev_q)))
+        k4.metric("Gemiste klikken t.o.v. groepsmediaan", nl(dev_g["missed_clicks"].sum()))
+
+        top_groups = dev_g.nlargest(40, "impressions").sort_values("vs_overall")
         c1, c2 = st.columns(2)
         with c1:
-            st.markdown(f"**Meest {ma.upper()}- en {mb.upper()}-typische woorden** (min. 200 klikken)")
-            sel = pd.concat([mk.nlargest(15, "index"), mk.nsmallest(15, "index")]).sort_values("index")
+            st.markdown("**Groepsmediaan t.o.v. de totale mediaan** (procentpunt)")
             fig = px.bar(
-                sel,
-                x="index",
-                y="ngram",
+                top_groups,
+                x="vs_overall",
+                y="group",
                 orientation="h",
-                color=np.where(sel["index"] > 0, mb.upper(), ma.upper()),
-                color_discrete_map={ma.upper(): NAVY, mb.upper(): RED},
-                hover_data={"total": ":,.0f", "share_b": ":.1f"},
-                labels={"index": f"Procentpunt {mb.upper()}-aandeel t.o.v. gemiddeld", "ngram": "", "color": ""},
+                color=np.where(top_groups["vs_overall"] >= 0, "Boven mediaan", "Onder mediaan"),
+                color_discrete_map={"Boven mediaan": NAVY, "Onder mediaan": RED},
+                custom_data=["group"],
+                hover_data={"median_ctr": ":.2f", "weighted_ctr": ":.2f", "queries": True, "impressions": ":,.0f"},
+                labels={"vs_overall": "Afwijking in procentpunt", "group": "", "color": ""},
             )
-            st.plotly_chart(style(fig, 720), width="stretch")
+            ev_dev_bar = st.plotly_chart(
+                style(fig, max(420, 22 * len(top_groups))),
+                width="stretch",
+                on_select="rerun",
+                selection_mode=("points", "box"),
+                key=f"dev_bar_{group_col}",
+            )
         with c2:
-            st.markdown(f"**{ma.upper()} versus {mb.upper()} klikken per woord**")
-            sc_mk = mk.nlargest(150, "total")
-            fig = px.scatter(
-                sc_mk,
-                x=ca,
-                y=cb,
-                text="ngram",
-                log_x=True,
-                log_y=True,
-                color="share_b",
-                color_continuous_scale="RdBu_r",
-                range_color=[0, 100],
-                labels={
-                    ca: f"Klikken {ma.upper()} (log)",
-                    cb: f"Klikken {mb.upper()} (log)",
-                    "share_b": f"% {mb.upper()}",
-                },
+            st.markdown("**Spreiding van de CTR binnen elke groep**: lijn = mediaan, doos = middelste 50%")
+            box_q = dev_q[dev_q["group"].isin(top_groups["group"])]
+            fig = px.box(
+                box_q,
+                x="ctr",
+                y="group",
+                orientation="h",
+                points=False,
+                category_orders={"group": top_groups["group"].tolist()},
+                labels={"ctr": "CTR % per zoekterm", "group": ""},
             )
-            lo, hi = max(1, sc_mk[[ca, cb]].min().min()), sc_mk[[ca, cb]].max().max()
-            ratio = base_share / (100 - base_share)
+            fig.update_traces(marker_color=NAVY, line_color=NAVY, fillcolor="rgba(74,111,165,0.25)")
+            fig.add_vline(x=overall, line_dash="dot", line_color=RED, annotation_text="totale mediaan")
+            st.plotly_chart(style(fig, max(420, 22 * len(top_groups))), width="stretch")
+
+        st.markdown("**Groepen in cijfers**")
+        ev_dev_tab = st.dataframe(
+            dev_g[
+                [
+                    "group",
+                    "queries",
+                    "impressions",
+                    "clicks",
+                    "median_ctr",
+                    "weighted_ctr",
+                    "spread",
+                    "vs_overall",
+                    "missed_clicks",
+                ]
+            ].sort_values("missed_clicks", ascending=False),
+            column_config={
+                "group": group_options[group_col],
+                "queries": num_col("Zoektermen"),
+                "impressions": num_col("Vertoningen"),
+                "clicks": num_col("Klikken"),
+                "median_ctr": st.column_config.NumberColumn("Mediaan-CTR %", format="%.2f"),
+                "weighted_ctr": st.column_config.NumberColumn(
+                    "Gewogen CTR %", format="%.2f", help="Klikken / vertoningen van de hele groep"
+                ),
+                "spread": st.column_config.NumberColumn(
+                    "Spreiding (IQR)", format="%.2f", help="Verschil tussen 25e en 75e percentiel"
+                ),
+                "vs_overall": st.column_config.NumberColumn("t.o.v. totale mediaan", format="%+.2f"),
+                "missed_clicks": num_col("Gemiste klikken"),
+            },
+            hide_index=True,
+            width="stretch",
+            height=320,
+            on_select="rerun",
+            selection_mode="multi-row",
+            key=f"dev_table_{group_col}",
+        )
+
+        picked = {p["customdata"][0] for p in selected_points(ev_dev_bar) if p.get("customdata")}
+        if ev_dev_tab.selection.rows:
+            ordered = dev_g.sort_values("missed_clicks", ascending=False)
+            picked |= set(ordered.iloc[ev_dev_tab.selection.rows]["group"])
+        scope = dev_q[dev_q["group"].isin(picked)] if picked else dev_q
+        scope_label = "groep(en): " + ", ".join(sorted(picked)[:6]) if picked else "alle groepen"
+        st.markdown(f"**Uitschieters binnen {scope_label}**")
+        if not picked:
+            st.caption("Klik op een balk of vink groepen aan in de tabel om in te zoomen.")
+        dev_cols = {
+            "query": "Zoekterm",
+            "group": group_options[group_col],
+            "impressions": num_col("Vertoningen"),
+            "clicks": num_col("Klikken"),
+            "ctr": st.column_config.NumberColumn("CTR %", format="%.2f"),
+            "group_median": st.column_config.NumberColumn("Groepsmediaan %", format="%.2f"),
+            "deviation": st.column_config.NumberColumn("Afwijking (pp)", format="%+.2f"),
+            "click_delta": num_col("Klikken t.o.v. mediaan"),
+        }
+        cols = list(dev_cols)
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown("🔻 **Onder de groepsmediaan**: meeste gemiste klikken")
+            st.dataframe(
+                scope.nsmallest(100, "click_delta")[cols],
+                column_config=dev_cols,
+                hide_index=True,
+                width="stretch",
+                height=460,
+            )
+        with c2:
+            st.markdown("🔺 **Boven de groepsmediaan**: wat werkt hier beter?")
+            st.dataframe(
+                scope.nlargest(100, "click_delta")[cols],
+                column_config=dev_cols,
+                hide_index=True,
+                width="stretch",
+                height=460,
+            )
+
+# --------------------------------------------------------------------------- #
+# 8. Vertoningen vs klikken
+# --------------------------------------------------------------------------- #
+with tabs[7]:
+    st.subheader("Vertoningen versus klikken")
+    st.caption(
+        "Elke stip is een n-gram, kopterm of zoekterm. De diagonale lijnen zijn vaste CTR-niveaus: alles op "
+        "dezelfde lijn klikt even goed. Boven de rode stippellijn = beter dan de mediaan, eronder = slechter. "
+        "Kleur = afwijking van de mediaan-CTR in procentpunt."
+    )
+    c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
+    unit = c1.segmented_control(
+        "Eenheid",
+        ["1-gram", "2-gram", "3-gram", "Kopterm", "Zoekterm"],
+        default="1-gram",
+    )
+    min_imp_sc = c2.number_input("Min. vertoningen", 0, value=10000, step=5000, key="sc_min_imp")
+    max_points = c3.select_slider("Max. stippen", [100, 200, 300, 500, 1000, 2000], value=300)
+    n_labels = c4.select_slider(
+        "Labels",
+        [0, 20, 40, 80, 150, "alle"],
+        value=40,
+        help="Labels voor de stippen met de grootste afwijking en de meeste vertoningen.",
+    )
+
+    unit = unit or "1-gram"
+    if unit.endswith("-gram"):
+        sc_df = ngrams(view, int(unit[0]), markets, "modifier", True, False).rename(columns={"ngram": "item"})
+    elif unit == "Kopterm":
+        hc = view.assign(cluster=head_clusters(view, metric, 5, True))
+        hc = hc[~hc["cluster"].isin(["(ruis)", "(overig)"])]
+        sc_df = (
+            hc.groupby("cluster")
+            .agg(queries=("query", "size"), clicks=("clicks", "sum"), impressions=("impressions", "sum"))
+            .reset_index()
+            .rename(columns={"cluster": "item"})
+        )
+    else:
+        sc_df = view[["query", "clicks", "impressions"]].rename(columns={"query": "item"}).assign(queries=1)
+    sc_df = sc_df[(sc_df["impressions"] >= max(min_imp_sc, 1)) & (sc_df["clicks"] > 0)].copy()
+
+    if sc_df.empty:
+        st.info("Niets om te tonen bij deze drempel.")
+    else:
+        sc_df["ctr"] = sc_df["clicks"] / sc_df["impressions"] * 100
+        med_ctr = sc_df["ctr"].median()
+        sc_df["vs_median"] = sc_df["ctr"] - med_ctr
+        sc_df["click_delta"] = (sc_df["vs_median"] / 100 * sc_df["impressions"]).round()
+        plot_df = sc_df.nlargest(max_points, "impressions")
+        lim = float(np.nanpercentile(np.abs(plot_df["vs_median"]), 95)) or 1.0
+
+        if n_labels == "alle":
+            label_items = set(plot_df["item"])
+        else:
+            label_items = set(
+                plot_df.reindex(plot_df["click_delta"].abs().sort_values(ascending=False).index).head(n_labels)["item"]
+            ) | set(plot_df.head(n_labels // 2)["item"])
+        plot_df = plot_df.assign(label=plot_df["item"].where(plot_df["item"].isin(label_items), ""))
+
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("Mediaan-CTR", f"{nl(med_ctr, 2)}%")
+        k2.metric("Items", nl(len(sc_df)))
+        k3.metric("Gemiste klikken (onder mediaan)", nl(-sc_df.loc[sc_df["click_delta"] < 0, "click_delta"].sum()))
+        k4.metric("Extra klikken (boven mediaan)", nl(sc_df.loc[sc_df["click_delta"] > 0, "click_delta"].sum()))
+
+        fig = px.scatter(
+            plot_df,
+            x="impressions",
+            y="clicks",
+            text="label",
+            log_x=True,
+            log_y=True,
+            color="vs_median",
+            color_continuous_scale="RdBu",
+            range_color=[-lim, lim],
+            custom_data=["item"],
+            hover_name="item",
+            hover_data={
+                "ctr": ":.2f",
+                "queries": True,
+                "impressions": ":,.0f",
+                "clicks": ":,.0f",
+                "vs_median": ":+.2f",
+            },
+            labels={
+                "impressions": "Vertoningen (log)",
+                "clicks": "Klikken (log)",
+                "vs_median": "pp t.o.v. mediaan",
+                "ctr": "CTR %",
+                "queries": "Zoektermen",
+            },
+        )
+        fig.update_traces(
+            textposition="top center", textfont_size=9, marker=dict(size=9, line=dict(width=0.6, color="#8a8f9c"))
+        )
+        lo = float(plot_df["impressions"].min())
+        hi = float(plot_df["impressions"].max())
+        for level in (0.5, 1, 2, 5, 10, 20):
             fig.add_scatter(
                 x=[lo, hi],
-                y=[lo * ratio, hi * ratio],
+                y=[lo * level / 100, hi * level / 100],
                 mode="lines",
-                name="gemiddelde verhouding",
-                line=dict(dash="dot", color=GREY),
+                line=dict(color=GREY, width=1, dash="dot"),
+                hoverinfo="skip",
+                showlegend=False,
             )
-            fig.update_traces(textposition="top center", textfont_size=9, selector=dict(mode="markers+text"))
-            st.plotly_chart(style(fig, 720), width="stretch")
-
-        th_m = view.groupby("theme")[[ca, cb]].sum()
-        th_m = (th_m.div(th_m.sum()) * 100).reset_index().melt("theme", var_name="markt", value_name="aandeel")
-        th_m["markt"] = th_m["markt"].str.replace("clicks_", "").str.upper()
-        st.markdown("**Thema-mix per markt** (% van de klikken binnen die markt)")
-        fig = px.bar(
-            th_m,
-            x="aandeel",
-            y="markt",
-            color="theme",
-            orientation="h",
-            color_discrete_sequence=THEME_COLORS,
-            labels={"aandeel": "%", "markt": "", "theme": ""},
+            fig.add_annotation(
+                x=np.log10(hi),
+                y=np.log10(hi * level / 100),
+                text=f"{nl(level, 1 if level < 1 else 0)}%",
+                showarrow=False,
+                xanchor="left",
+                font=dict(size=10, color=GREY),
+            )
+        fig.add_scatter(
+            x=[lo, hi],
+            y=[lo * med_ctr / 100, hi * med_ctr / 100],
+            mode="lines",
+            line=dict(color=RED, width=2, dash="dash"),
+            name=f"mediaan {nl(med_ctr, 2)}%",
+            hoverinfo="skip",
         )
-        st.plotly_chart(style(fig, 280), width="stretch")
+        ymin = max(float(plot_df["clicks"].min()) * 0.7, 0.5)
+        fig.update_yaxes(range=[np.log10(ymin), np.log10(float(plot_df["clicks"].max()) * 1.6)])
+        ev_sc = st.plotly_chart(
+            style(fig, 760),
+            width="stretch",
+            on_select="rerun",
+            selection_mode=("points", "box", "lasso"),
+            key=f"imp_click_{unit}",
+        )
+
+        picked = {p["customdata"][0] for p in selected_points(ev_sc) if p.get("customdata")}
+        table = sc_df[sc_df["item"].isin(picked)] if picked else sc_df
+        st.markdown(
+            f"**{'Selectie: ' + nl(len(picked)) + ' items' if picked else 'Alle items boven de drempel'}**"
+            " · sorteer op een kolom; negatieve 'klikken t.o.v. mediaan' = gemiste klikken"
+        )
+        if not picked:
+            st.caption("Klik op stippen of sleep een kader / lasso in de grafiek om de tabel te filteren.")
+        st.dataframe(
+            table.sort_values("impressions", ascending=False)[
+                ["item", "queries", "impressions", "clicks", "ctr", "vs_median", "click_delta"]
+            ],
+            column_config={
+                "item": {"Kopterm": "Kopterm", "Zoekterm": "Zoekterm"}.get(unit, "N-gram"),
+                "queries": num_col("Zoektermen"),
+                "impressions": num_col("Vertoningen"),
+                "clicks": num_col("Klikken"),
+                "ctr": st.column_config.NumberColumn("CTR %", format="%.2f"),
+                "vs_median": st.column_config.NumberColumn("t.o.v. mediaan (pp)", format="%+.2f"),
+                "click_delta": num_col("Klikken t.o.v. mediaan"),
+            },
+            hide_index=True,
+            width="stretch",
+            height=480,
+        )
+        if picked and unit != "Zoekterm":
+            if unit.endswith("-gram"):
+                long = query_ngram_rows(view, int(unit[0]), "modifier", True, False)
+                rows = long.loc[long["ngram"].isin(picked), "row"].unique()
+                sel_q = view.loc[rows]
+            else:
+                sel_q = hc[hc["cluster"].isin(picked)]
+            selection_table(sel_q, metric, "Onderliggende zoektermen", key="imp_click_queries")
 
 # --------------------------------------------------------------------------- #
 # 8. Kansen
 # --------------------------------------------------------------------------- #
-with tabs[7]:
+with tabs[8]:
     st.subheader("Zichtbaar, maar weinig geklikt")
-    st.caption(
-        "N-grammen met veel vertoningen en een CTR onder de mediaan van vergelijkbare termen. "
-        "'Gemiste klikken' = wat erbij komt als de CTR naar die mediaan gaat. Let op: deze export bevat "
-        "geen positie, dus een lage CTR kan ook komen door een lage ranking of een SERP-feature."
+    st.markdown(
+        """
+Dit tabblad zoekt woorden en woordcombinaties (n-grammen) die vaak in Google verschijnen, maar
+relatief weinig klikken krijgen. **Hoe het werkt:** de app neemt alle n-grammen met minstens het
+ingestelde aantal vertoningen (standaard de 5% met de meeste vertoningen) en berekent daarvan de
+mediaan-CTR. Elk n-gram dat daaronder zit is een kans. **Gemiste klikken** = (mediaan-CTR − eigen CTR)
+× eigen vertoningen: zoveel klikken komen erbij als dit n-gram net zo goed zou klikken als een
+gemiddelde term in dezelfde zichtbaarheidsklasse.
+
+**Zo lees je het:** in de grafiek staat elke bubbel voor een n-gram; rood zijn de 25 grootste kansen,
+de stippellijn is de mediaan. Rechtsonder (veel vertoningen, lage CTR) zit het meeste te halen.
+Zoek de term daarna op in Google en kijk wat de oorzaak is: staat het merk niet bovenaan, wint een
+advertentie, shoppingblok, AI Overview of marktplaats de klik, of sluit de titel/snippet niet aan
+op wat de zoeker wil?
+
+**Let op:** de export bevat geen gemiddelde positie, dus een lage CTR kan ook een lage ranking zijn.
+N-grammen overlappen (*cadeaukaart* zit ook in *cadeaukaart saldo*), dus de gemiste klikken van
+verschillende rijen mag je niet zomaar optellen; het totaal bovenaan is een bovengrens.
+"""
     )
     c1, c2 = st.columns(2)
     n_op = c1.segmented_control("N-gram  ", [1, 2, 3], default=2, format_func=lambda v: f"{v}-gram")
@@ -1020,8 +1277,7 @@ with tabs[7]:
     if op.empty:
         st.info("Geen kansen bij deze drempel.")
     else:
-        med = op["ctr"].median() + op["ctr_gap"].median()
-        st.metric("Potentieel extra klikken (top 25)", nl(op.head(25)["missed_clicks"].sum()))
+        st.metric("Potentieel extra klikken (top 25, bovengrens)", nl(op.head(25)["missed_clicks"].sum()))
         pool = ng_op[ng_op["impressions"] >= thr]
         fig = px.scatter(
             pool,
@@ -1046,7 +1302,7 @@ with tabs[7]:
 # --------------------------------------------------------------------------- #
 # 9. Ruis & typo's
 # --------------------------------------------------------------------------- #
-with tabs[8]:
+with tabs[9]:
     st.subheader("Wat is geen merk?")
     noise = data[~data["is_branded"]]
     c1, c2, c3 = st.columns(3)
@@ -1098,7 +1354,7 @@ with tabs[8]:
 # --------------------------------------------------------------------------- #
 # 10. Data
 # --------------------------------------------------------------------------- #
-with tabs[9]:
+with tabs[10]:
     st.subheader("Verrijkte dataset")
     st.caption("Elke zoekterm met type, merkvariant, modifier, positie, thema en kopterm-cluster.")
     export = data.assign(cluster=head_clusters(data, metric, 5, True))

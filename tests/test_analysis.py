@@ -119,3 +119,29 @@ def test_load_queries_detects_markets(tmp_path):
 def test_near_brand_tokens(df):
     nb = an.near_brand_tokens(df, ["acme"])
     assert "acmetool" in nb["token"].tolist()
+
+
+def test_ctr_deviation_against_group_median():
+    raw = pd.DataFrame({
+        "query": ["a1", "a2", "a3", "b1", "b2", "b3"],
+        "clicks": [10, 20, 30, 1, 2, 3],
+        "impressions": [100] * 6,
+        "grp": ["a"] * 3 + ["b"] * 3,
+    })
+    queries, groups = an.ctr_deviation(raw, "grp", min_group_size=3)
+    q = queries.set_index("query")
+    assert q.at["a1", "group_median"] == pytest.approx(20)
+    assert q.at["a1", "deviation"] == pytest.approx(-10)
+    assert q.at["a1", "click_delta"] == -10
+    g = groups.set_index("grp")
+    assert g.at["a", "missed_clicks"] == 10
+    assert groups.attrs["overall_median"] == pytest.approx(6.5)
+    assert g.at["a", "vs_overall"] == pytest.approx(13.5)
+
+
+def test_ctr_deviation_filters_small_groups_and_impressions():
+    raw = pd.DataFrame({"query": ["x", "y", "z"], "clicks": [1, 1, 1], "impressions": [5, 500, 500], "grp": ["a"] * 3})
+    queries, _ = an.ctr_deviation(raw, "grp", min_impressions=100, min_group_size=2)
+    assert set(queries["query"]) == {"y", "z"}
+    queries, _ = an.ctr_deviation(raw, "grp", min_impressions=100, min_group_size=3)
+    assert queries.empty

@@ -438,6 +438,40 @@ def word_context(df: pd.DataFrame, term: str, metric: str = "clicks") -> pd.Data
     return pd.DataFrame(rows, columns=["row", "left", "right", "value"])
 
 
+def ctr_deviation(df: pd.DataFrame, group_col: str, min_impressions: float = 0,
+                  min_group_size: int = 5) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Compare every query's CTR with the median CTR of its own group.
+
+    Returns (queries, groups). ``deviation`` is in percentage points;
+    ``click_delta`` is the click difference versus the group median at the
+    query's own impressions (negative = clicks missed, positive = extra).
+    """
+    d = df[df["impressions"] >= max(min_impressions, 1)].copy()
+    d["ctr"] = d["clicks"] / d["impressions"] * 100
+    grouped = d.groupby(group_col)["ctr"]
+    d["group_median"] = grouped.transform("median")
+    d["group_size"] = grouped.transform("size")
+    d = d[d["group_size"] >= min_group_size]
+    d["deviation"] = d["ctr"] - d["group_median"]
+    d["click_delta"] = (d["deviation"] / 100 * d["impressions"]).round()
+
+    overall_median = d["ctr"].median() if len(d) else 0.0
+    groups = d.groupby(group_col).agg(
+        queries=("query", "size"),
+        clicks=("clicks", "sum"),
+        impressions=("impressions", "sum"),
+        median_ctr=("ctr", "median"),
+        q25=("ctr", lambda s: s.quantile(0.25)),
+        q75=("ctr", lambda s: s.quantile(0.75)),
+        missed_clicks=("click_delta", lambda s: -s[s < 0].sum()),
+    ).reset_index()
+    groups["weighted_ctr"] = groups["clicks"] / groups["impressions"] * 100
+    groups["vs_overall"] = groups["median_ctr"] - overall_median
+    groups["spread"] = groups["q75"] - groups["q25"]
+    groups.attrs["overall_median"] = overall_median
+    return d, groups.sort_values("vs_overall", ascending=False, ignore_index=True)
+
+
 def opportunity_table(ngrams: pd.DataFrame, min_impressions: float) -> pd.DataFrame:
     """N-grams with many impressions but a CTR below the median of comparable terms."""
     pool = ngrams[ngrams["impressions"] >= min_impressions].copy()
