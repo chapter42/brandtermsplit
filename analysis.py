@@ -10,7 +10,7 @@ import re
 import numpy as np
 import pandas as pd
 
-BRAND_TOKEN = "‹merk›"
+BRAND_TOKEN = "‹brand›"
 
 
 MARKET_TOKENS = {
@@ -25,23 +25,24 @@ STOPWORDS = {
     "-", "&", "+", "/", ".", ":", "|",
 }
 
-# Ordered: the first theme that matches a query wins.
+# Ordered: the first theme that matches a query wins. Keywords cover Dutch and English queries.
 DEFAULT_THEMES = {
-    "Inloggen & account": "inloggen, login, log, inlog, account, wachtwoord, registreren, aanmelden, uitloggen, profiel, mijn",
-    "Klantenservice & contact": "klantenservice, klantendienst, contact, bellen, telefoonnummer, telefoon, nummer, chat, chatten, mailen, email, mail, whatsapp, klacht, klachten, hulp, help, service, customer, bereikbaar",
-    "Cadeaukaart & saldo": "cadeaukaart, cadeaubon, cadeaukaarten, bon, bonnen, saldo, giftcard, gift, tegoed, waardebon, vvv, checken, inwisselen, verzilveren, kaart",
-    "Bestellingen & retour": "bestelling, bestellingen, retour, retourneren, retouren, terugsturen, annuleren, track, volgen, status, garantie, reparatie, terugbetaling, geannuleerd",
-    "Bezorging & afhalen": "bezorging, bezorgen, levering, leveren, verzending, verzendkosten, afhaalpunt, pakket, pakketje, bezorgd, ophalen, levertijd, bezorger",
-    "Betalen": "betalen, achteraf, klarna, ideal, rekening, betaling, factuur, afbetalen, gespreid, betaalmethode, creditcard",
-    "Zakelijk & verkopen": "zakelijk, verkopen, partner, partners, partnerplatform, verkoper, seller, affiliate, logistiek, adverteren, sell",
-    "Acties & abonnement": "korting, kortingscode, kortingscodes, actie, acties, aanbieding, aanbiedingen, deals, deal, black, friday, sale, uitverkoop, dagdeal, cyber, outlet, tweedekans",
-    "Bedrijf & werken": "vacatures, vacature, werken, werkenbij, hoofdkantoor, adres, kantoor, aandelen, ceo, eigenaar, jobs, stage, magazijn, nieuws, bedrijf",
-    "Website & app": "app, website, site, online, winkel, webshop, homepage, storing, www",
+    "Login & account": "inloggen, login, log, inlog, account, wachtwoord, registreren, aanmelden, uitloggen, profiel, mijn, signin, sign, password, register, logout, profile, my",
+    "Customer service & contact": "klantenservice, klantendienst, contact, bellen, telefoonnummer, telefoon, nummer, chat, chatten, mailen, email, mail, whatsapp, klacht, klachten, hulp, help, service, customer, bereikbaar, support, phone, call, complaint",
+    "Gift card & balance": "cadeaukaart, cadeaubon, cadeaukaarten, bon, bonnen, saldo, giftcard, gift, tegoed, waardebon, vvv, checken, inwisselen, verzilveren, kaart, voucher, balance, redeem",
+    "Orders & returns": "bestelling, bestellingen, retour, retourneren, retouren, terugsturen, annuleren, track, volgen, status, garantie, reparatie, terugbetaling, geannuleerd, order, orders, return, returns, refund, cancel, tracking, warranty, repair",
+    "Delivery & pickup": "bezorging, bezorgen, levering, leveren, verzending, verzendkosten, afhaalpunt, pakket, pakketje, bezorgd, ophalen, levertijd, bezorger, delivery, deliver, shipping, pickup, parcel, package",
+    "Payment": "betalen, achteraf, klarna, ideal, rekening, betaling, factuur, afbetalen, gespreid, betaalmethode, creditcard, pay, payment, invoice, paypal, afterpay, installments",
+    "Business & selling": "zakelijk, verkopen, partner, partners, partnerplatform, verkoper, seller, affiliate, logistiek, adverteren, sell, business, advertise, b2b",
+    "Deals & subscription": "korting, kortingscode, kortingscodes, actie, acties, aanbieding, aanbiedingen, deals, deal, black, friday, sale, uitverkoop, dagdeal, cyber, outlet, tweedekans, discount, coupon, promo, subscription",
+    "Company & careers": "vacatures, vacature, werken, werkenbij, hoofdkantoor, adres, kantoor, aandelen, ceo, eigenaar, jobs, stage, magazijn, nieuws, bedrijf, careers, vacancy, office, address, headquarters, investor, shares, news",
+    "Website & app": "app, website, site, online, winkel, webshop, homepage, storing, www, store, shop, outage",
 }
 
-THEME_PRODUCT = "Product & assortiment"
-THEME_PURE = "Puur merk"
-THEME_MARKET = "Alleen land/markt"
+THEME_PRODUCT = "Products & range"
+THEME_PURE = "Brand only"
+THEME_MARKET = "Country only"
+NOISE = "No brand (noise)"
 
 
 # --------------------------------------------------------------------------- #
@@ -128,8 +129,8 @@ def load_queries(source) -> tuple[pd.DataFrame, list[str]]:
     guess = guess_columns(raw)
     if None in (guess["query"], guess["clicks"], guess["impressions"]):
         raise ValueError(
-            "Kon de kolommen voor zoekterm, klikken en vertoningen niet vinden. "
-            f"Gevonden kolommen: {', '.join(map(str, raw.columns))}"
+            "Could not find the query, clicks and impressions columns. "
+            f"Columns found: {', '.join(map(str, raw.columns))}"
         )
     return normalise(raw, guess["query"], guess["clicks"], guess["impressions"], guess["position"])
 
@@ -202,7 +203,7 @@ def split_brand(df: pd.DataFrame, brands: list[str], typos: list[str], fuzzy: bo
 
     method = pd.Series("", index=out.index, dtype=object)
     method[has_brand] = "exact"
-    method[has_typo] = "typo (lijst)"
+    method[has_typo] = "typo (list)"
 
     rest = ~(has_brand | has_typo)
     if fuzzy:
@@ -223,11 +224,11 @@ def split_brand(df: pd.DataFrame, brands: list[str], typos: list[str], fuzzy: bo
                 if hits:
                     variant[idx] = hits[0]
                     marked[idx] = " ".join(BRAND_TOKEN if t in words else t for t in tokens)
-                    method[idx] = "deel merk (CTR)"
+                    method[idx] = "partial brand (CTR)"
 
     out["brand_variant"] = variant.fillna("").str.replace(r"\s+", " ", regex=True).str.strip()
     out["marked"] = marked.str.replace(r"\s+", " ", regex=True).str.strip()
-    out["match_method"] = method.replace("", "geen")
+    out["match_method"] = method.replace("", "none")
 
     is_branded = method.ne("")
     out["modifier"] = np.where(
@@ -242,16 +243,17 @@ def split_brand(df: pd.DataFrame, brands: list[str], typos: list[str], fuzzy: bo
     pure = out["modifier"].eq("")
     is_exact = method.eq("exact")
     is_typo = method.str.startswith("typo")
-    is_part = method.eq("deel merk (CTR)")
+    is_part = method.eq("partial brand (CTR)")
     out["query_type"] = np.select(
         [is_exact & pure, is_exact, is_typo & pure, is_typo, is_part & pure, is_part],
-        ["Puur merk", "Merk + modifier", "Typo puur", "Typo + modifier", "Deel merk puur", "Deel merk + modifier"],
-        default="Geen merk (ruis)",
+        ["Brand only", "Brand + modifier", "Typo only", "Typo + modifier", "Partial brand only",
+         "Partial brand + modifier"],
+        default=NOISE,
     )
     out["is_branded"] = is_branded
 
     out["position"] = [
-        _modifier_position(m) if b else "n.v.t."
+        _modifier_position(m) if b else "n/a"
         for m, b in zip(out["marked"], is_branded)
     ]
     out["n_words"] = q.str.split().str.len()
@@ -320,18 +322,18 @@ def _fuzzy_mark(query: str, brands: list[str]) -> tuple[str, str] | None:
 def _modifier_position(marked: str) -> str:
     tokens = marked.split()
     if BRAND_TOKEN not in tokens:
-        return "n.v.t."
+        return "n/a"
     first = tokens.index(BRAND_TOKEN)
     last = len(tokens) - 1 - tokens[::-1].index(BRAND_TOKEN)
     before = first > 0
     after = last < len(tokens) - 1
     if before and after:
-        return "Rondom merk"
+        return "Around brand"
     if before:
-        return "Vóór merk"
+        return "Before brand"
     if after:
-        return "Na merk"
-    return "Alleen merk"
+        return "After brand"
+    return "Brand only"
 
 
 def _market_tag(tokens: list[str]) -> str:
@@ -345,7 +347,7 @@ def _market_tag(tokens: list[str]) -> str:
 # Themes (rule based intent)
 # --------------------------------------------------------------------------- #
 def parse_themes(text: str) -> dict[str, set[str]]:
-    """Parse ``Thema: woord, woord`` lines into an ordered dict."""
+    """Parse ``Theme: word, word`` lines into an ordered dict."""
     themes = {}
     for line in text.splitlines():
         if ":" not in line:
@@ -364,7 +366,7 @@ def themes_to_text(themes: dict[str, str]) -> str:
 def assign_themes(df: pd.DataFrame, themes: dict[str, set[str]]) -> pd.Series:
     def theme_for(modifier: str, branded: bool) -> str:
         if not branded:
-            return "Geen merk (ruis)"
+            return NOISE
         tokens = modifier.split()
         if not tokens:
             return THEME_PURE
@@ -448,7 +450,7 @@ def head_term_clusters(df: pd.DataFrame, metric: str = "clicks", min_queries: in
         parts.append(query_ngrams(df, 2, drop_stopwords=True, drop_market=True))
     long = pd.concat(parts, ignore_index=True)
     if long.empty:
-        return pd.Series("(geen)", index=df.index)
+        return pd.Series("(none)", index=df.index)
 
     joined = long.join(df[[metric]], on="row")
     stats = joined.groupby("ngram").agg(queries=("row", "size"), vol=(metric, "sum"))
@@ -470,10 +472,10 @@ def head_term_clusters(df: pd.DataFrame, metric: str = "clicks", min_queries: in
     best = (ranked.sort_values(["words", "rank"], ascending=[False, True])
             .drop_duplicates("row").set_index("row")["ngram"])
 
-    result = pd.Series("(overig)", index=df.index, dtype=object)
+    result = pd.Series("(other)", index=df.index, dtype=object)
     result.loc[best.index] = best
-    result[df["modifier"].eq("")] = "(puur merk)"
-    result[~df["is_branded"]] = "(ruis)"
+    result[df["modifier"].eq("")] = "(brand only)"
+    result[~df["is_branded"]] = "(noise)"
     return result
 
 
@@ -579,8 +581,8 @@ def word_context(df: pd.DataFrame, term: str, metric: str = "clicks") -> pd.Data
         tokens = text.split()
         for i in range(len(tokens) - n + 1):
             if tokens[i:i + n] == term_tokens:
-                left = tokens[i - 1] if i > 0 else "‹begin›"
-                right = tokens[i + n] if i + n < len(tokens) else "‹einde›"
+                left = tokens[i - 1] if i > 0 else "‹start›"
+                right = tokens[i + n] if i + n < len(tokens) else "‹end›"
                 rows.append((idx, left, right, value))
                 break
     return pd.DataFrame(rows, columns=["row", "left", "right", "value"])

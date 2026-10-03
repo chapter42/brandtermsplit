@@ -67,6 +67,14 @@
 - Bug: column choices stuck when switching files (widget keys); keys now include the file's columns.
 - New dependency: streamlit[auth] (Authlib). Secrets template in `.streamlit/secrets.toml.example`.
 
+**Round 8 (same day)**
+- Whole UI in English (labels, themes, query types, messages, number format 1,000.00); theme keyword
+  lists now cover Dutch and English queries.
+- Every view has a short "Why it matters" note; README rewritten around why the analysis matters.
+- Caches for uploaded data expire after an hour and keep at most 20 entries.
+- MIT license added.
+- Running Streamlit server kept the old `analysis` module in memory after the rename; restart needed.
+
 **Next**
 - Numbers in tables use the browser locale (`format="localized"`); a Dutch browser shows 1.000, an English one 1,000.
 - Test the Google login end-to-end once the OAuth client exists (local, then Streamlit Cloud).

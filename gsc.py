@@ -25,11 +25,11 @@ class GSCError(Exception):
 def _call(method: str, url: str, token: str, **kwargs) -> dict:
     response = requests.request(method, url, headers={"Authorization": f"Bearer {token}"}, timeout=120, **kwargs)
     if response.status_code == 401:
-        raise GSCError("Je Google-sessie is verlopen. Log uit en opnieuw in.", 401)
+        raise GSCError("Your Google session has expired. Log out and log in again.", 401)
     if response.status_code == 403:
         raise GSCError(
-            "Geen toegang: dit account heeft geen rechten op deze property, "
-            "of de login mist de Search Console-toestemming.",
+            "No access: this account has no permission for this property, "
+            "or the login is missing the Search Console permission.",
             403,
         )
     if not response.ok:
@@ -37,7 +37,7 @@ def _call(method: str, url: str, token: str, **kwargs) -> dict:
             detail = response.json()["error"]["message"]
         except (ValueError, KeyError):
             detail = response.text[:300]
-        raise GSCError(f"Search Console API-fout ({response.status_code}): {detail}", response.status_code)
+        raise GSCError(f"Search Console API error ({response.status_code}): {detail}", response.status_code)
     return response.json()
 
 
