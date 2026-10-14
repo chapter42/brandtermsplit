@@ -85,6 +85,9 @@
   and vs. same quarter a year earlier. Needs a quarter/date column (`an.period_table`, `an.to_quarter`);
   without one the tab shows `sql/branded_queries_by_quarter.sql` (BigQuery bulk export).
 - Themes and filters come from per-query totals and are joined back to each quarter.
+- SQL now per ISO week (`sql/branded_queries_by_week.sql`). The tab groups weeks by calendar
+  (week/month/quarter) or 4-4-5 (week/period/quarter, 52-week years from a chosen Monday, no 53rd week)
+  and flags periods with missing weeks.
 
 **Next**
 - Numbers in tables use the browser locale (`format="localized"`); a Dutch browser shows 1.000, an English one 1,000.

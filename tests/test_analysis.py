@@ -284,7 +284,13 @@ def test_guess_period_column():
     assert an.guess_columns(raw)["period"] == "Quarter"
 
 
-def test_theme_trend_and_summary():
+def _themed(raw):
+    themed = an.split_brand(an.normalise(raw, "query", "clicks", "impressions")[0], ["acme"], [])
+    themed["theme"] = an.assign_themes(themed, an.parse_themes(an.themes_to_text(an.DEFAULT_THEMES)))
+    return themed
+
+
+def test_theme_trend_and_summary_quarter_labels():
     raw = pd.DataFrame(
         {
             "query": ["acme login", "acme login", "acme sale", "acme sale", "acme login"],
@@ -293,12 +299,58 @@ def test_theme_trend_and_summary():
             "impressions": ["100", "200", "300", "100", "400"],
         }
     )
-    periods = an.period_table(raw, "query", "clicks", "impressions", "quarter")
-    themed = an.split_brand(an.normalise(raw, "query", "clicks", "impressions")[0], ["acme"], [])
-    themed["theme"] = an.assign_themes(themed, an.parse_themes(an.themes_to_text(an.DEFAULT_THEMES)))
-    trend = an.theme_trend(periods, themed, "clicks")
+    periods = an.label_periods(an.period_table(raw, "query", "clicks", "impressions", "quarter"))
+    trend = an.theme_trend(periods, _themed(raw), "clicks")
     q1 = trend[trend["period"] == "2024-Q1"].set_index("theme")
     assert q1.loc["Login & account", "share"] == pytest.approx(25)
     summary = an.trend_summary(trend, "clicks").set_index("theme")
     assert summary.loc["Login & account", "vs_year_earlier"] == pytest.approx(300)
     assert summary.loc["Login & account", "vs_previous"] == pytest.approx(100)
+
+
+def test_daily_dates_become_monday_weeks():
+    raw = pd.DataFrame(
+        {
+            "query": ["acme"] * 3,
+            "date": ["2025-01-06", "2025-01-12", "2025-01-13"],
+            "clicks": ["1", "2", "4"],
+            "impressions": ["10", "10", "10"],
+        }
+    )
+    p = an.period_table(raw, "query", "clicks", "impressions", "date")
+    assert dict(zip(p["week"].dt.strftime("%Y-%m-%d"), p["clicks"])) == {"2025-01-06": 3, "2025-01-13": 4}
+
+
+def test_week_labels_calendar():
+    weeks = pd.Series(pd.to_datetime(["2024-12-30", "2025-03-31"]))
+    assert an.week_labels(weeks, "calendar", "week").tolist() == ["2025-W01", "2025-W14"]
+    assert an.week_labels(weeks, "calendar", "month").tolist() == ["2024-M12", "2025-M03"]
+    assert an.week_labels(weeks, "calendar", "quarter").tolist() == ["2024-Q4", "2025-Q1"]
+
+
+def test_week_labels_445():
+    start = pd.Timestamp("2024-12-30")
+    weeks = pd.Series(start + pd.to_timedelta([0, 3, 4, 7, 8, 12, 13, 51, 52], unit="W"))
+    assert an.week_labels(weeks, "445", "month", start).tolist() == [
+        "FY2025-P01",
+        "FY2025-P01",
+        "FY2025-P02",
+        "FY2025-P02",
+        "FY2025-P03",
+        "FY2025-P03",
+        "FY2025-P04",
+        "FY2025-P12",
+        "FY2026-P01",
+    ]
+    assert an.week_labels(weeks, "445", "quarter", start).tolist()[5:8] == ["FY2025-Q1", "FY2025-Q2", "FY2025-Q4"]
+    # a start date that is not a Monday snaps back to the Monday before it
+    assert an.week_labels(weeks[:1], "445", "week", "2025-01-01").tolist() == ["FY2025-W01"]
+
+
+def test_incomplete_periods_and_445_year_earlier():
+    start = pd.Timestamp("2024-12-30")
+    weeks = start + pd.to_timedelta(range(2, 60), unit="W")
+    periods = pd.DataFrame({"query": "acme login", "week": weeks, "period": "", "clicks": 1.0, "impressions": 1.0})
+    assert an.incomplete_periods(periods, "445", "quarter", start) == ["FY2025-Q1", "FY2026-Q1"]
+    assert an._year_earlier("FY2026-P03") == "FY2025-P03"
+    assert an._year_earlier("2025-W07") == "2024-W07"

@@ -57,7 +57,7 @@ Every view in the app carries a short *Why it matters* note explaining what to d
 | Tab | Shows |
 | --- | --- |
 | Overview | Brand / modifier / noise share of queries vs. impressions vs. clicks, long-tail curve, modifier position, brand variants, query length vs. CTR |
-| Themes over time | Volume and share per theme per quarter, change vs. previous quarter and vs. a year earlier (needs a quarter or date column) |
+| Themes over time | Volume and share per theme per week, month or quarter (calendar or 4-4-5 from a chosen start date), change vs. previous period and vs. a year earlier (needs a week or date column) |
 | N-grams | Top n-grams (colour = CTR), impressions-vs-CTR bubble chart, full sortable table |
 | Where the volume is | Treemap / sunburst / icicle theme → head term → query, and a Sankey position → theme → country |
 | Clusters | Head-term bubble chart with drill-down, or semantic cluster map + treemap |
@@ -86,9 +86,9 @@ column names include:
 - impressions: `total_impressions`, `impressions`, `vertoningen`, `weergaven`
 - average position (optional): `position`, `positie`, `average position`
 - per market (optional): `clicks_nl`, `clicks_be`, `clicks_de`, … (kept in the enriched export)
-- quarter or date (optional): `quarter`, `kwartaal`, `period`, `date`, `datum`; one row per query per quarter.
-  Values like `2025-Q1`, `Q1 2025` or a date. Other tabs sum the quarters per query.
-  `sql/branded_queries_by_quarter.sql` fetches this from the Search Console bulk export in BigQuery.
+- week or date (optional): `week`, `date`, `data_date`, `datum`, `quarter`; one row per query per week (or day).
+  Dates are grouped into Monday-to-Sunday weeks; quarter labels like `2025-Q1` also work. Other tabs sum the
+  weeks per query. `sql/branded_queries_by_week.sql` fetches this from the Search Console bulk export in BigQuery.
 
 When a column isn't recognised, pick it yourself under *Columns* in the sidebar. Both the English and
 the Dutch Search Console interface export work as-is (note that the interface only exports the top

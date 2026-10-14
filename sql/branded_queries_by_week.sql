@@ -1,20 +1,22 @@
--- Branded queries per quarter from the Search Console bulk export in BigQuery.
--- The result loads in the app as is: the "quarter" column switches on the "Themes over time" tab.
+-- Branded queries per week from the Search Console bulk export in BigQuery.
+-- The result loads in the app as is: the "week" column switches on the "Themes over time" tab, which
+-- groups the weeks into calendar months/quarters or 4-4-5 periods from a start date you choose.
 --
 -- Replace before running:
 --   my-project.searchconsole  -> your project and export dataset
 --   brand regex               -> brand plus its typos/variants, e.g. r'acme|acmee|amce'
---   dates                     -> start and end on quarter boundaries, or the last quarter looks like a drop
+--   dates                     -> start on a Monday and end on a Sunday, so the first and last week are complete
 --
--- The bulk export has no backfill: quarters before the export was switched on are missing.
+-- Weeks run Monday to Sunday; "week" is the Monday.
+-- The bulk export has no backfill: weeks before the export was switched on are missing.
 -- Run a dry run first to see the bytes scanned (the table is partitioned on data_date).
 
-DECLARE start_date DATE DEFAULT '2025-01-01';
-DECLARE end_date DATE DEFAULT '2026-09-30';
+DECLARE start_date DATE DEFAULT '2024-12-30';
+DECLARE end_date DATE DEFAULT '2026-09-27';
 
 SELECT
   query,
-  FORMAT('%d-Q%d', EXTRACT(YEAR FROM data_date), EXTRACT(QUARTER FROM data_date)) AS quarter,
+  DATE_TRUNC(data_date, ISOWEEK) AS week,
   SUM(IF(country = 'nld', clicks, 0)) AS clicks_nl,
   SUM(IF(country = 'bel', clicks, 0)) AS clicks_be,
   SUM(clicks) AS total_clicks,
@@ -27,5 +29,5 @@ WHERE data_date BETWEEN start_date AND end_date
   AND NOT is_anonymized_query
   AND country IN ('nld', 'bel')
   AND REGEXP_CONTAINS(query, r'acme')
-GROUP BY query, quarter
-ORDER BY quarter, total_clicks DESC;
+GROUP BY query, week
+ORDER BY week, total_clicks DESC;

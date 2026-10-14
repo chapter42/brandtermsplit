@@ -55,7 +55,7 @@ QUERY_COLUMNS = (
 CLICK_COLUMNS = ("total_clicks", "clicks", "klikken", "kliks", "url clicks")
 IMPRESSION_COLUMNS = ("total_impressions", "impressions", "vertoningen", "weergaven", "impr")
 POSITION_COLUMNS = ("position", "positie", "avg. position", "average position", "gemiddelde positie", "avg_position")
-PERIOD_COLUMNS = ("quarter", "kwartaal", "period", "periode", "data_date", "date", "datum", "month", "maand")
+PERIOD_COLUMNS = ("week", "quarter", "kwartaal", "period", "periode", "data_date", "date", "datum", "month", "maand")
 
 
 def read_table(source) -> pd.DataFrame:
@@ -145,34 +145,104 @@ def to_quarter(s: pd.Series) -> pd.Series:
 
 def period_table(raw: pd.DataFrame, query_col: str, clicks_col: str, impressions_col: str,
                  period_col: str) -> pd.DataFrame:
-    """Long frame query, period (quarter), clicks, impressions: one row per query per quarter."""
+    """Long frame query, week, period, clicks, impressions.
+
+    Dates (daily or weekly) become ``week``: the Monday of their week, so they can be regrouped later
+    (calendar or 4-4-5). Quarter labels without a date ("2025-Q1") go to ``period`` with ``week`` empty.
+    """
+    text = raw[period_col].astype(str).str.strip()
+    label = to_quarter(text)
+    is_label = label.str.fullmatch(r"\d{4}-Q[1-4]") & ~text.str.fullmatch(r"\d{4}-\d{2}-\d{2}.*")
+    dates = pd.to_datetime(text.where(~is_label), errors="coerce", format="mixed")
+    week = (dates - pd.to_timedelta(dates.dt.weekday, unit="D")).dt.normalize()
     df = pd.DataFrame({
         "query": raw[query_col].astype(str).str.lower().str.strip(),
-        "period": to_quarter(raw[period_col]),
+        "week": week,
+        "period": label.where(is_label & week.isna(), ""),
         "clicks": _to_number(raw[clicks_col]),
         "impressions": _to_number(raw[impressions_col]),
     })
-    df = df[df["query"].ne("") & df["query"].ne("nan") & df["period"].ne("")]
-    return df.groupby(["period", "query"], as_index=False)[["clicks", "impressions"]].sum()
+    df = df[df["query"].ne("") & df["query"].ne("nan") & (df["week"].notna() | df["period"].ne(""))]
+    return df.groupby(["week", "period", "query"], as_index=False, dropna=False)[["clicks", "impressions"]].sum()
+
+
+def first_monday_on_or_before(day) -> pd.Timestamp:
+    day = pd.Timestamp(day).normalize()
+    return day - pd.Timedelta(days=day.weekday())
+
+
+def week_labels(weeks: pd.Series, calendar: str = "calendar", grain: str = "quarter", start=None) -> pd.Series:
+    """Period label for each week start (a Monday).
+
+    calendar="calendar": ISO week "2025-W05", month "2025-M03" or quarter "2025-Q1"; a week belongs to the
+    month or quarter its Monday falls in.
+    calendar="445": 52-week years from ``start`` (a Monday), quarters of 13 weeks split 4-4-5 into periods:
+    week "FY2025-W05", period "FY2025-P03", quarter "FY2025-Q1". The fiscal year is named after the calendar
+    year of its first Thursday. No 53rd week: over many years the calendar drifts.
+    """
+    weeks = pd.to_datetime(weeks)
+    if calendar == "calendar":
+        if grain == "week":
+            iso = weeks.dt.isocalendar()
+            return iso["year"].astype(str) + "-W" + iso["week"].astype(int).map("{:02d}".format)
+        if grain == "month":
+            return weeks.dt.year.astype(str) + "-M" + weeks.dt.month.map("{:02d}".format)
+        return weeks.dt.year.astype(str) + "-Q" + weeks.dt.quarter.astype(str)
+    start = first_monday_on_or_before(start)
+    idx = (weeks - start).dt.days // 7
+    year_no, week_in_year = idx // 52, idx % 52
+    fy = ((start + pd.Timedelta(days=3)).year + year_no).astype(str)
+    quarter = week_in_year // 13 + 1
+    pos = week_in_year % 13
+    period = (quarter - 1) * 3 + np.select([pos < 4, pos < 8], [1, 2], 3)
+    if grain == "week":
+        return "FY" + fy + "-W" + (week_in_year + 1).map("{:02d}".format)
+    if grain == "month":
+        return "FY" + fy + "-P" + pd.Series(period, index=weeks.index).map("{:02d}".format)
+    return "FY" + fy + "-Q" + quarter.astype(str)
+
+
+def label_periods(periods: pd.DataFrame, calendar: str = "calendar", grain: str = "quarter",
+                  start=None) -> pd.DataFrame:
+    """Fill ``period`` from ``week`` with the chosen calendar and grain; rows that only had a label keep it."""
+    out = periods.copy()
+    dated = out["week"].notna()
+    if dated.any():
+        unique = pd.Series(out.loc[dated, "week"].unique())
+        mapping = dict(zip(unique, week_labels(unique, calendar, grain, start)))
+        out.loc[dated, "period"] = out.loc[dated, "week"].map(mapping)
+    return out
+
+
+def incomplete_periods(periods: pd.DataFrame, calendar: str = "calendar", grain: str = "quarter",
+                       start=None) -> list[str]:
+    """Periods with fewer weeks in the data than they span: usually the first and last one."""
+    weeks = pd.Series(periods["week"].dropna().unique())
+    if weeks.empty or grain == "week":
+        return []
+    full = pd.Series(pd.date_range(weeks.min() - pd.Timedelta(days=400), weeks.max() + pd.Timedelta(days=400),
+                                   freq="W-MON"))
+    expected = week_labels(full, calendar, grain, start).value_counts()
+    present = week_labels(weeks, calendar, grain, start).value_counts()
+    return sorted(p for p, n in present.items() if n < expected.get(p, 0))
 
 
 def theme_trend(periods: pd.DataFrame, themed: pd.DataFrame, metric: str) -> pd.DataFrame:
     """Volume per theme per period plus its share of that period's volume.
 
-    Themes come from ``themed`` (one row per query, already filtered); queries not in it are dropped.
+    ``periods`` needs a filled ``period`` column (see label_periods). Themes come from ``themed``
+    (one row per query, already filtered); queries not in it are dropped.
     """
     merged = periods.merge(themed[["query", "theme"]], on="query", how="inner")
-    out = merged.groupby(["period", "theme"], as_index=False).agg(
-        queries=("query", "nunique"), clicks=("clicks", "sum"), impressions=("impressions", "sum")
-    )
+    out = merged.groupby(["period", "theme"], as_index=False)[["clicks", "impressions"]].sum()
     total = out.groupby("period")[metric].transform("sum")
     out["share"] = (out[metric] / total.where(total > 0) * 100).fillna(0)
     return out.sort_values(["period", metric], ascending=[True, False]).reset_index(drop=True)
 
 
 def _year_earlier(period: str) -> str | None:
-    m = re.fullmatch(r"(\d{4})-Q([1-4])", period)
-    return f"{int(m.group(1)) - 1}-Q{m.group(2)}" if m else None
+    m = re.fullmatch(r"(FY)?(\d{4})-([WMPQ]\d+)", period)
+    return f"{m.group(1) or ''}{int(m.group(2)) - 1}-{m.group(3)}" if m else None
 
 
 def trend_summary(trend: pd.DataFrame, metric: str) -> pd.DataFrame:
