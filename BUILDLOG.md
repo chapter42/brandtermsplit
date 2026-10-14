@@ -79,6 +79,13 @@
 - Google login works locally and on https://brandtermsplit.streamlit.app. Cloud failure was a
   commented-out `redirect_uri` in the cloud secrets; the app now names missing auth keys itself.
 
+## 2026-10-14
+
+- New second tab "Themes over time": volume and share per theme per quarter, change vs. previous quarter
+  and vs. same quarter a year earlier. Needs a quarter/date column (`an.period_table`, `an.to_quarter`);
+  without one the tab shows `sql/branded_queries_by_quarter.sql` (BigQuery bulk export).
+- Themes and filters come from per-query totals and are joined back to each quarter.
+
 **Next**
 - Numbers in tables use the browser locale (`format="localized"`); a Dutch browser shows 1.000, an English one 1,000.
 

@@ -55,6 +55,7 @@ QUERY_COLUMNS = (
 CLICK_COLUMNS = ("total_clicks", "clicks", "klikken", "kliks", "url clicks")
 IMPRESSION_COLUMNS = ("total_impressions", "impressions", "vertoningen", "weergaven", "impr")
 POSITION_COLUMNS = ("position", "positie", "avg. position", "average position", "gemiddelde positie", "avg_position")
+PERIOD_COLUMNS = ("quarter", "kwartaal", "period", "periode", "data_date", "date", "datum", "month", "maand")
 
 
 def read_table(source) -> pd.DataFrame:
@@ -88,6 +89,7 @@ def guess_columns(raw: pd.DataFrame) -> dict[str, str | None]:
         "clicks": pick(CLICK_COLUMNS),
         "impressions": pick(IMPRESSION_COLUMNS),
         "position": pick(POSITION_COLUMNS),
+        "period": pick(PERIOD_COLUMNS),
     }
 
 
@@ -121,6 +123,77 @@ def normalise(raw: pd.DataFrame, query_col: str, clicks_col: str, impressions_co
     if "avg_position" in df:
         df["avg_position"] = (df["avg_position"] / df["impressions"].where(df["impressions"] > 0)).round(2)
     return df, markets
+
+
+def to_quarter(s: pd.Series) -> pd.Series:
+    """Quarter label "2025-Q1" from "2025-Q1", "2025Q1", "Q1 2025" or a date; anything else is kept as is."""
+    text = s.astype(str).str.strip()
+    out = pd.Series(pd.NA, index=s.index, dtype="object")
+    m = text.str.extract(r"^(\d{4})\s*[-/ ]?\s*[qQ]([1-4])$")
+    hit = m[0].notna()
+    out[hit] = m[0][hit] + "-Q" + m[1][hit]
+    m = text.str.extract(r"^[qQ]([1-4])\s*[-/ ]?\s*(\d{4})$")
+    hit2 = m[0].notna() & out.isna()
+    out[hit2] = m[1][hit2] + "-Q" + m[0][hit2]
+    rest = out.isna()
+    if rest.any():
+        dates = pd.to_datetime(text[rest], errors="coerce", format="mixed")
+        ok = dates.notna()
+        out[rest[rest].index[ok]] = dates[ok].dt.to_period("Q").astype(str).str.replace("Q", "-Q").to_numpy()
+    return out.fillna(text)
+
+
+def period_table(raw: pd.DataFrame, query_col: str, clicks_col: str, impressions_col: str,
+                 period_col: str) -> pd.DataFrame:
+    """Long frame query, period (quarter), clicks, impressions: one row per query per quarter."""
+    df = pd.DataFrame({
+        "query": raw[query_col].astype(str).str.lower().str.strip(),
+        "period": to_quarter(raw[period_col]),
+        "clicks": _to_number(raw[clicks_col]),
+        "impressions": _to_number(raw[impressions_col]),
+    })
+    df = df[df["query"].ne("") & df["query"].ne("nan") & df["period"].ne("")]
+    return df.groupby(["period", "query"], as_index=False)[["clicks", "impressions"]].sum()
+
+
+def theme_trend(periods: pd.DataFrame, themed: pd.DataFrame, metric: str) -> pd.DataFrame:
+    """Volume per theme per period plus its share of that period's volume.
+
+    Themes come from ``themed`` (one row per query, already filtered); queries not in it are dropped.
+    """
+    merged = periods.merge(themed[["query", "theme"]], on="query", how="inner")
+    out = merged.groupby(["period", "theme"], as_index=False).agg(
+        queries=("query", "nunique"), clicks=("clicks", "sum"), impressions=("impressions", "sum")
+    )
+    total = out.groupby("period")[metric].transform("sum")
+    out["share"] = (out[metric] / total.where(total > 0) * 100).fillna(0)
+    return out.sort_values(["period", metric], ascending=[True, False]).reset_index(drop=True)
+
+
+def _year_earlier(period: str) -> str | None:
+    m = re.fullmatch(r"(\d{4})-Q([1-4])", period)
+    return f"{int(m.group(1)) - 1}-Q{m.group(2)}" if m else None
+
+
+def trend_summary(trend: pd.DataFrame, metric: str) -> pd.DataFrame:
+    """One row per theme: volume per period, change of the last period vs the previous one and vs a year earlier."""
+    wide = trend.pivot_table(index="theme", columns="period", values=metric, aggfunc="sum", fill_value=0)
+    periods = sorted(wide.columns)
+    wide = wide[periods]
+    last = periods[-1]
+
+    def change(ref):
+        if ref not in wide.columns:
+            return pd.Series(np.nan, index=wide.index)
+        return (wide[last] - wide[ref]) / wide[ref].where(wide[ref] > 0) * 100
+
+    out = wide.copy()
+    out["vs_previous"] = change(periods[-2]) if len(periods) > 1 else np.nan
+    out["vs_year_earlier"] = change(_year_earlier(last))
+    shares = trend.pivot_table(index="theme", columns="period", values="share", aggfunc="sum", fill_value=0)
+    out["share_last"] = shares[last]
+    out["share_change_pp"] = shares[last] - shares[periods[0]]
+    return out.sort_values(last, ascending=False).reset_index()
 
 
 def load_queries(source) -> tuple[pd.DataFrame, list[str]]:

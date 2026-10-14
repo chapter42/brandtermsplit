@@ -272,3 +272,33 @@ def test_ngram_table_position():
     d = an.split_brand(raw, ["acme"], [])
     ng = an.ngram_table(d, 1, []).set_index("ngram")
     assert ng.at["login", "avg_position"] == pytest.approx(2.5)
+
+
+def test_to_quarter_formats():
+    s = pd.Series(["2025-Q1", "2025Q3", "Q2 2024", "2025-05-04", "2025-11-30", "foo"])
+    assert an.to_quarter(s).tolist() == ["2025-Q1", "2025-Q3", "2024-Q2", "2025-Q2", "2025-Q4", "foo"]
+
+
+def test_guess_period_column():
+    raw = pd.DataFrame({"query": ["acme"], "clicks": ["1"], "impressions": ["2"], "Quarter": ["2025-Q1"]})
+    assert an.guess_columns(raw)["period"] == "Quarter"
+
+
+def test_theme_trend_and_summary():
+    raw = pd.DataFrame(
+        {
+            "query": ["acme login", "acme login", "acme sale", "acme sale", "acme login"],
+            "quarter": ["2024-Q1", "2024-Q2", "2024-Q1", "2024-Q2", "2025-Q1"],
+            "clicks": ["10", "20", "30", "10", "40"],
+            "impressions": ["100", "200", "300", "100", "400"],
+        }
+    )
+    periods = an.period_table(raw, "query", "clicks", "impressions", "quarter")
+    themed = an.split_brand(an.normalise(raw, "query", "clicks", "impressions")[0], ["acme"], [])
+    themed["theme"] = an.assign_themes(themed, an.parse_themes(an.themes_to_text(an.DEFAULT_THEMES)))
+    trend = an.theme_trend(periods, themed, "clicks")
+    q1 = trend[trend["period"] == "2024-Q1"].set_index("theme")
+    assert q1.loc["Login & account", "share"] == pytest.approx(25)
+    summary = an.trend_summary(trend, "clicks").set_index("theme")
+    assert summary.loc["Login & account", "vs_year_earlier"] == pytest.approx(300)
+    assert summary.loc["Login & account", "vs_previous"] == pytest.approx(100)

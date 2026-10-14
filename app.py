@@ -162,6 +162,14 @@ def normalise(raw, query_col, clicks_col, impressions_col, position_col=None):
     return an.normalise(raw, query_col, clicks_col, impressions_col, position_col)
 
 
+@st.cache_data(show_spinner="Splitting volume per quarter…", **CACHE)
+def by_period(raw, query_col, clicks_col, impressions_col, period_col):
+    return an.period_table(raw, query_col, clicks_col, impressions_col, period_col)
+
+
+SQL_PATH = APP_DIR / "sql" / "branded_queries_by_quarter.sql"
+
+
 # --------------------------------------------------------------------------- #
 # Search Console via Google login
 # --------------------------------------------------------------------------- #
@@ -322,7 +330,7 @@ def sem_clusters(df, k, top_n):
 with st.sidebar:
     st.header("Data")
     source = st.segmented_control("Source", ["CSV file", "Search Console"], default="CSV file") or "CSV file"
-    raw, markets, gsc_request = None, [], None
+    raw, markets, gsc_request, periods = None, [], None, None
     if source == "CSV file":
         upload = st.file_uploader(
             "CSV with queries",
@@ -362,6 +370,7 @@ with st.sidebar:
             clicks_col = col_pick("Clicks", "clicks")
             impressions_col = col_pick("Impressions", "impressions")
             position_col = col_pick("Avg. position (optional)", "position", optional=True)
+            period_col = col_pick("Quarter / date (optional)", "period", optional=True)
         if None in (query_col, clicks_col, impressions_col):
             st.info("Pick the columns for query, clicks and impressions.")
             st.stop()
@@ -371,9 +380,12 @@ with st.sidebar:
         raw, markets = normalise(
             table, query_col, clicks_col, impressions_col, None if position_col == "(none)" else position_col
         )
+        if period_col != "(none)" and period_col not in (query_col, clicks_col, impressions_col):
+            periods = by_period(table, query_col, clicks_col, impressions_col, period_col)
         st.caption(
             f"{fmt(len(raw))} unique queries"
             + (f" · markets: {', '.join(m.upper() for m in markets)}" if markets else "")
+            + (f" · {periods['period'].nunique()} quarters" if periods is not None else "")
         )
     else:
         gsc_request = gsc_panel()
@@ -525,6 +537,7 @@ if len(view) < len(data):
 tabs = st.tabs(
     [
         "📊 Overview",
+        "Themes over time",
         "🔤 N-grams",
         "🗺️ Where the volume is",
         "🧩 Clusters",
@@ -671,9 +684,89 @@ with tabs[0]:
         st.plotly_chart(style(fig, 460), width="stretch")
 
 # --------------------------------------------------------------------------- #
-# 2. N-grams
+# 2. Themes over time
 # --------------------------------------------------------------------------- #
 with tabs[1]:
+    st.subheader("Which themes grow or shrink per quarter?")
+    why(
+        "total brand demand moves with seasons and campaigns. Following each theme per quarter, and its share of "
+        "the quarter, shows which needs around the brand are really gaining or losing ground."
+    )
+    if periods is None:
+        st.info(
+            "This view needs a **quarter or date column** in the data; the current file has one row per query "
+            "for the whole period. Fetch the queries per quarter with the SQL below (Search Console bulk export "
+            "in BigQuery), upload the result and pick the column under *Columns → Quarter / date*."
+        )
+        if SQL_PATH.exists():
+            st.code(SQL_PATH.read_text(), language="sql")
+    else:
+        trend = an.theme_trend(periods, view, metric)
+        if trend.empty:
+            st.warning("No queries in the current selection have a quarter.")
+        else:
+            quarters = sorted(trend["period"].unique())
+            theme_order = list(trend.groupby("theme")[metric].sum().sort_values(ascending=False).index)
+            colors = dict(zip(theme_order, THEME_COLORS))
+            unit = (
+                st.segmented_control("Show", ["Volume", "Share of quarter"], default="Volume", key="trend_unit")
+                or "Volume"
+            )
+            y_col, y_label = (metric, M) if unit == "Volume" else ("share", f"Share of {M.lower()} (%)")
+            c1, c2 = st.columns([3, 2])
+            with c1:
+                fig = px.line(
+                    trend,
+                    x="period",
+                    y=y_col,
+                    color="theme",
+                    markers=True,
+                    category_orders={"period": quarters, "theme": theme_order},
+                    color_discrete_map=colors,
+                    labels={"period": "", y_col: y_label, "theme": "Theme"},
+                )
+                st.plotly_chart(style(fig, 460), width="stretch")
+            with c2:
+                fig = px.bar(
+                    trend,
+                    x="period",
+                    y="share",
+                    color="theme",
+                    category_orders={"period": quarters, "theme": theme_order},
+                    color_discrete_map=colors,
+                    labels={"period": "", "share": f"Share of {M.lower()} (%)", "theme": "Theme"},
+                )
+                fig.update_layout(showlegend=False, barmode="stack")
+                st.plotly_chart(style(fig, 460), width="stretch")
+
+            last = quarters[-1]
+            st.markdown(f"**Change per theme, {last}**")
+            st.caption(
+                "Compare with the same quarter a year earlier where possible: quarter on quarter mostly shows "
+                "seasonality. Share change = share in the last quarter minus share in the first. "
+                "Themes and filters come from each query's total, so a query keeps one theme in every quarter."
+            )
+            summary = an.trend_summary(trend, metric)
+            st.dataframe(
+                summary,
+                column_config={
+                    "theme": "Theme",
+                    **{q: num_col(q) for q in quarters},
+                    "vs_previous": st.column_config.NumberColumn("vs previous quarter %", format="%+.1f"),
+                    "vs_year_earlier": st.column_config.NumberColumn("vs year earlier %", format="%+.1f"),
+                    "share_last": st.column_config.NumberColumn(f"Share {last} %", format="%.1f"),
+                    "share_change_pp": st.column_config.NumberColumn(
+                        f"Share change {quarters[0]} to {last} (pp)", format="%+.1f"
+                    ),
+                },
+                hide_index=True,
+                width="stretch",
+            )
+
+# --------------------------------------------------------------------------- #
+# 3. N-grams
+# --------------------------------------------------------------------------- #
+with tabs[2]:
     st.subheader("Which words and word combinations occur?")
     why(
         "single queries are too fragmented to act on. Counting the words and phrases across all queries shows "
@@ -770,9 +863,9 @@ with tabs[1]:
         )
 
 # --------------------------------------------------------------------------- #
-# 3. Where the volume is
+# 4. Where the volume is
 # --------------------------------------------------------------------------- #
-with tabs[2]:
+with tabs[3]:
     st.subheader("Where is the volume?")
     st.caption("Theme → head term → query. Click in the chart to zoom in.")
     why(
@@ -912,9 +1005,9 @@ with tabs[2]:
     )
 
 # --------------------------------------------------------------------------- #
-# 4. Clusters
+# 5. Clusters
 # --------------------------------------------------------------------------- #
-with tabs[3]:
+with tabs[4]:
     st.subheader("Clusters")
     why(
         "clusters turn thousands of loose queries into a manageable list of topics, each with its volume and "
@@ -1073,9 +1166,9 @@ with tabs[3]:
             )
 
 # --------------------------------------------------------------------------- #
-# 5. Word explorer
+# 6. Word explorer
 # --------------------------------------------------------------------------- #
-with tabs[4]:
+with tabs[5]:
     st.subheader("Word explorer")
     st.caption("Pick a word and see what people type before and after it. ‹brand› = the brand name in any variant.")
     why(
@@ -1162,9 +1255,9 @@ with tabs[4]:
             selection_table(view.loc[sel_ctx["row"].unique()], metric, label, key="ctx_sel")
 
 # --------------------------------------------------------------------------- #
-# 6. Co-occurrence
+# 7. Co-occurrence
 # --------------------------------------------------------------------------- #
-with tabs[5]:
+with tabs[6]:
     st.subheader("Which words occur together?")
     st.caption("Cell = total volume of queries that contain both words. Find out which questions belong together.")
     why(
@@ -1199,9 +1292,9 @@ with tabs[5]:
         )
 
 # --------------------------------------------------------------------------- #
-# 7. CTR deviation
+# 8. CTR deviation
 # --------------------------------------------------------------------------- #
-with tabs[6]:
+with tabs[7]:
     st.subheader("Does the CTR deviate from the group median?")
     st.caption(
         "Every query is compared with the median CTR of its own group. That shows which groups click "
@@ -1364,9 +1457,9 @@ with tabs[6]:
             )
 
 # --------------------------------------------------------------------------- #
-# 8. Impressions vs clicks
+# 9. Impressions vs clicks
 # --------------------------------------------------------------------------- #
-with tabs[7]:
+with tabs[8]:
     st.subheader("Impressions versus clicks")
     st.caption(
         "Every dot is an n-gram, head term or query. The diagonal lines are fixed CTR levels: everything on "
@@ -1542,9 +1635,9 @@ with tabs[7]:
             selection_table(sel_q, metric, "Underlying queries", key="imp_click_queries")
 
 # --------------------------------------------------------------------------- #
-# 9. Opportunities
+# 10. Opportunities
 # --------------------------------------------------------------------------- #
-with tabs[8]:
+with tabs[9]:
     st.subheader("Visible, but rarely clicked")
     why(
         "people searching with your brand name already want you. When those searches are shown often but "
@@ -1606,9 +1699,9 @@ cannot simply be added up; the total at the top is an upper bound.
         )
 
 # --------------------------------------------------------------------------- #
-# 10. Noise & typos
+# 11. Noise & typos
 # --------------------------------------------------------------------------- #
-with tabs[9]:
+with tabs[10]:
     st.subheader("Brand or noise?")
     st.caption(
         "How each query was recognised as brand. Check the typos (fuzzy) and 'partial brand' in particular: "
@@ -1740,9 +1833,9 @@ with tabs[9]:
         )
 
 # --------------------------------------------------------------------------- #
-# 11. Data
+# 12. Data
 # --------------------------------------------------------------------------- #
-with tabs[10]:
+with tabs[11]:
     st.subheader("Enriched dataset")
     st.caption("Every query with type, brand variant, modifier, position, theme and head-term cluster.")
     why(
