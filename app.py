@@ -158,13 +158,8 @@ def read_raw(data: bytes):
 
 
 @st.cache_data(show_spinner="Converting columns…", **CACHE)
-def normalise(raw, query_col, clicks_col, impressions_col, position_col=None):
-    return an.normalise(raw, query_col, clicks_col, impressions_col, position_col)
-
-
-@st.cache_data(show_spinner="Splitting volume per week…", **CACHE)
-def by_period(raw, query_col, clicks_col, impressions_col, period_col):
-    return an.period_table(raw, query_col, clicks_col, impressions_col, period_col)
+def load(raw, columns: an.Columns):
+    return an.load(raw, columns)
 
 
 SQL_PATH = APP_DIR / "sql" / "branded_queries_by_week.sql"
@@ -215,7 +210,7 @@ def gsc_sites(user: str, _token: str):
 def gsc_fetch(user: str, site: str, start: str, end: str, search_type: str, regex, max_rows: int, _token: str):
     # ``user`` is part of the cache key so one user never sees another user's data.
     data = gsc.fetch_queries(_token, site, start, end, search_type, regex, max_rows)
-    return an.normalise(data, "query", "clicks", "impressions", "avg_position")[0]
+    return an.load(data, an.Columns("query", "clicks", "impressions", "avg_position")).queries
 
 
 def gsc_panel():
@@ -298,10 +293,8 @@ def gsc_panel():
 
 
 @st.cache_data(show_spinner="Splitting brand and assigning themes…", **CACHE)
-def prepare(df, brands, typos, theme_text, fuzzy, partial_min_ctr):
-    out = an.split_brand(df, list(brands), list(typos), fuzzy, partial_min_ctr)
-    out["theme"] = an.assign_themes(out, an.parse_themes(theme_text))
-    return out
+def prepare(df, config: an.BrandConfig):
+    return an.enrich(df, config)
 
 
 @st.cache_data(show_spinner="Counting n-grams…", **CACHE)
@@ -309,14 +302,9 @@ def ngrams(df, n, markets, column, drop_stop, drop_market):
     return an.ngram_table(df, n, list(markets), column, drop_stop, drop_market)
 
 
-@st.cache_data(show_spinner=False, **CACHE)
-def query_ngram_rows(df, n, column, drop_stop, drop_market):
-    return an.query_ngrams(df, n, column, drop_stop, drop_market)
-
-
 @st.cache_data(show_spinner="Clustering by head term…", **CACHE)
-def head_clusters(df, metric, min_queries, bigrams):
-    return an.head_term_clusters(df, metric, min_queries, bigrams)
+def head_terms(df, metric, min_queries=5, bigrams=True, exclude=()):
+    return an.with_head_terms(df, metric, min_queries, bigrams, exclude)
 
 
 @st.cache_data(show_spinner="Semantic clustering (TF-IDF + k-means)…", **CACHE)
@@ -330,7 +318,7 @@ def sem_clusters(df, k, top_n):
 with st.sidebar:
     st.header("Data")
     source = st.segmented_control("Source", ["CSV file", "Search Console"], default="CSV file") or "CSV file"
-    raw, markets, gsc_request, periods = None, [], None, None
+    raw, markets, gsc_request, weekly = None, [], None, None
     if source == "CSV file":
         upload = st.file_uploader(
             "CSV with queries",
@@ -377,21 +365,21 @@ with st.sidebar:
         if len({query_col, clicks_col, impressions_col}) < 3:
             st.error("Pick three different columns.")
             st.stop()
-        raw, markets = normalise(
-            table, query_col, clicks_col, impressions_col, None if position_col == "(none)" else position_col
+        loaded = load(
+            table,
+            an.Columns(
+                query_col,
+                clicks_col,
+                impressions_col,
+                None if position_col == "(none)" else position_col,
+                None if period_col == "(none)" else period_col,
+            ),
         )
-        if period_col != "(none)" and period_col not in (query_col, clicks_col, impressions_col):
-            periods = by_period(table, query_col, clicks_col, impressions_col, period_col)
+        raw, markets, weekly = loaded.queries, loaded.markets, loaded.weekly
         st.caption(
             f"{fmt(len(raw))} unique queries"
             + (f" · markets: {', '.join(m.upper() for m in markets)}" if markets else "")
-            + (
-                f" · {periods['week'].nunique()} weeks"
-                if periods is not None and periods["week"].notna().any()
-                else f" · {periods['period'].nunique()} quarters"
-                if periods is not None
-                else ""
-            )
+            + (f" · {weekly.describe()}" if weekly is not None else "")
         )
     else:
         gsc_request = gsc_panel()
@@ -478,7 +466,8 @@ if source == "Search Console":
             f"{gsc_request['start']} to {gsc_request['end']}"
             + (" · maximum reached, raise 'Max. rows' for more" if len(raw) >= gsc_request["max_rows"] else "")
         )
-data = prepare(raw, brand_list, typo_list, theme_text, fuzzy, partial_ctr if use_partial else None)
+brand_config = an.BrandConfig(brand_list, typo_list, fuzzy, partial_ctr if use_partial else None, theme_text)
+data = prepare(raw, brand_config)
 HAS_POSITION = "avg_position" in data.columns
 markets = tuple(markets)
 
@@ -499,13 +488,7 @@ with st.sidebar:
     )
     min_impr = st.number_input("Min. impressions per query", 0, value=0, step=10)
 
-view = data if include_noise else data[data["is_branded"]]
-if only_products:
-    view = view[view["theme"].isin([an.THEME_PRODUCT, an.NOISE])]
-elif themes_out:
-    view = view[~view["theme"].isin(themes_out)]
-if min_impr:
-    view = view[view["impressions"] >= min_impr]
+view = an.select(data, an.Selection(include_noise, only_products, tuple(themes_out), min_impr))
 modifiers = view[view["modifier"].ne("")]
 
 M = METRIC_LABELS[metric]
@@ -568,9 +551,7 @@ with tabs[0]:
         "name. Knowing that split first keeps every later number honest, and shows how much demand is pure "
         "navigation (people who already chose you) versus brand plus a need you can serve with content."
     )
-    by_type = data.groupby("query_type").agg(
-        queries=("query", "size"), clicks=("clicks", "sum"), impressions=("impressions", "sum")
-    )
+    by_type = an.summarise(data, "query_type").set_index("query_type")[["queries", "clicks", "impressions"]]
     shares = (by_type / by_type.sum() * 100).reset_index().melt("query_type", var_name="measure", value_name="share")
     shares["measure"] = shares["measure"].map(METRIC_LABELS)
     fig = px.bar(
@@ -618,13 +599,7 @@ with tabs[0]:
             "'brand + word' usually means navigation to a known task, 'word + brand' often means comparing or "
             "checking the brand for a need. Each asks for a different page."
         )
-        pos = (
-            view[view["position"].ne("n/a")]
-            .groupby("position")
-            .agg(clicks=("clicks", "sum"), impressions=("impressions", "sum"), queries=("query", "size"))
-            .reset_index()
-        )
-        pos["ctr"] = pos["clicks"] / pos["impressions"] * 100
+        pos = an.summarise(view[view["position"].ne("n/a")], "position")
         fig = px.bar(
             pos,
             x="position",
@@ -641,13 +616,7 @@ with tabs[0]:
     with c1:
         st.markdown("**Brand variants: how do people write the brand?**")
         why("variants with real volume (domain spellings, typos) belong in brand filters, ad campaigns and reports.")
-        var = (
-            data[data["is_branded"]]
-            .groupby("brand_variant")
-            .agg(clicks=("clicks", "sum"), impressions=("impressions", "sum"), queries=("query", "size"))
-        )
-        var["ctr"] = var["clicks"] / var["impressions"] * 100
-        var = var.nlargest(15, metric).reset_index()
+        var = an.summarise(data[data["is_branded"]], "brand_variant").nlargest(15, metric)
         fig = px.bar(
             var,
             y="brand_variant",
@@ -664,13 +633,7 @@ with tabs[0]:
     with c2:
         st.markdown("**Query length versus CTR**")
         why("longer queries are more specific; if their CTR drops, the pages that should answer them are missing.")
-        ln = (
-            view.assign(len_bucket=view["n_words"].clip(upper=8))
-            .groupby("len_bucket")
-            .agg(clicks=("clicks", "sum"), impressions=("impressions", "sum"), queries=("query", "size"))
-            .reset_index()
-        )
-        ln["ctr"] = ln["clicks"] / ln["impressions"] * 100
+        ln = an.summarise(view.assign(len_bucket=view["n_words"].clip(upper=8)), "len_bucket")
         ln["len_bucket"] = ln["len_bucket"].map(lambda v: "8+" if v >= 8 else str(v))
         fig = go.Figure()
         fig.add_bar(x=ln["len_bucket"], y=ln["queries"], name="Queries", marker_color=GREY)
@@ -698,7 +661,7 @@ with tabs[1]:
         "total brand demand moves with seasons and campaigns. Following each theme per period, and its share of "
         "the period, shows which needs around the brand are really gaining or losing ground."
     )
-    if periods is None:
+    if weekly is None:
         st.info(
             "This view needs a **week or date column** in the data; the current file has one row per query "
             "for the whole period. Fetch the queries per week with the SQL below (Search Console bulk export "
@@ -707,11 +670,10 @@ with tabs[1]:
         if SQL_PATH.exists():
             st.code(SQL_PATH.read_text(), language="sql")
     else:
-        has_weeks = periods["week"].notna().any()
-        calendar, grain, start = "calendar", "quarter", None
-        if has_weeks:
+        calendar = an.Calendar()
+        if weekly.has_dates:
             c1, c2, c3 = st.columns([2, 2, 2])
-            calendar = (
+            kind = (
                 c1.segmented_control(
                     "Calendar",
                     ["calendar", "445"],
@@ -728,39 +690,33 @@ with tabs[1]:
                     "Per",
                     ["week", "month", "quarter"],
                     default="quarter",
-                    format_func={
-                        "week": "Week",
-                        "month": "Month" if calendar == "calendar" else "Period",
-                        "quarter": "Quarter",
-                    }.get,
+                    format_func=lambda g: an.Calendar(kind, g).unit_name.title(),
                     key="trend_grain",
                 )
                 or "quarter"
             )
-            if calendar == "445":
-                first = periods["week"].min()
-                picked = c3.date_input(
+            start = None
+            if kind == "445":
+                start = c3.date_input(
                     "Start of the fiscal year (a Monday)",
-                    an.first_monday_on_or_before(date(first.year, 1, 1)).date(),
+                    weekly.default_start(),
                     format="YYYY-MM-DD",
                     key="trend_start",
                 )
-                start = an.first_monday_on_or_before(picked)
-                if start.date() != picked:
-                    c3.caption(f"Not a Monday: weeks start on {start.date().isoformat()}.")
+            calendar = an.Calendar(kind, grain, start)
+            if calendar.week_start is not None and calendar.week_start.date() != start:
+                c3.caption(f"Not a Monday: weeks start on {calendar.week_start.date().isoformat()}.")
         else:
             st.caption("The data has quarter labels without dates, so only calendar quarters are available.")
-        labelled = an.label_periods(periods, calendar, grain, start)
-        trend = an.theme_trend(labelled, view, metric)
+        result = weekly.trend(view, metric, calendar)
+        trend, order, unit_name = result.long, result.order, result.unit_name
         if trend.empty:
             st.warning("No queries in the current selection have a period.")
         else:
-            unit_name = {"week": "week", "month": "month" if calendar == "calendar" else "period"}.get(grain, "quarter")
-            order = sorted(trend["period"].unique())
-            incomplete = an.incomplete_periods(periods, calendar, grain, start) if has_weeks else []
-            if incomplete:
+            if result.incomplete:
                 st.caption(
-                    f"Not every week is in the data for: {', '.join(incomplete)}. Compare those {unit_name}s with care."
+                    f"Not every week is in the data for: {', '.join(result.incomplete)}. "
+                    f"Compare those {unit_name}s with care."
                 )
             theme_order = list(trend.groupby("theme")[metric].sum().sort_values(ascending=False).index)
             colors = dict(zip(theme_order, THEME_COLORS))
@@ -776,7 +732,7 @@ with tabs[1]:
                     x="period",
                     y=y_col,
                     color="theme",
-                    markers=grain != "week",
+                    markers=calendar.grain != "week",
                     category_orders={"period": order, "theme": theme_order},
                     color_discrete_map=colors,
                     labels={"period": "", y_col: y_label, "theme": "Theme"},
@@ -802,9 +758,8 @@ with tabs[1]:
                 "mostly shows seasonality. Share change = share in the last column minus share in the first. "
                 "Themes and filters come from each query's total, so a query keeps one theme in every period."
             )
-            summary = an.trend_summary(trend, metric)
             st.dataframe(
-                summary,
+                result.summary,
                 column_config={
                     "theme": "Theme",
                     **{q: num_col(q) for q in order},
@@ -909,9 +864,8 @@ with tabs[2]:
     chosen |= set(ng_f[show_cols].iloc[ev_tab.selection.rows]["ngram"]) if ev_tab.selection.rows else set()
     st.markdown("**Queries in your selection**")
     if chosen:
-        long = query_ngram_rows(view, n or 1, source, drop_stop, drop_mkt)
-        rows = long.loc[long["ngram"].isin(chosen), "row"].unique()
-        selection_table(view.loc[rows], metric, ", ".join(sorted(chosen)[:8]), key="ng_sel_table")
+        sel = an.queries_containing(view, chosen, n or 1, source, drop_stop, drop_mkt)
+        selection_table(sel, metric, ", ".join(sorted(chosen)[:8]), key="ng_sel_table")
     else:
         st.caption(
             "Click a bar or bubble (or drag a box / lasso, or tick rows in the table) "
@@ -940,7 +894,7 @@ with tabs[3]:
     )
 
     vol = view[view["modifier"].ne("")] if hide_pure else view
-    vol = vol.assign(cluster=head_clusters(vol, metric, 3, True))
+    vol = head_terms(vol, metric, min_queries=3)
     # Products are a long tail, so that theme gets more room than the service themes.
     top_clusters = (
         vol.groupby(["theme", "cluster"])[metric]
@@ -986,13 +940,7 @@ with tabs[3]:
             id_map["/".join(parts)] = dict(zip(levels, row[: len(parts) - 1]))
     picked = [id_map[p["id"]] for p in selected_points(event) if p.get("id") in id_map]
     if picked:
-        mask = pd.Series(False, index=vol.index)
-        for cond in picked:
-            m = pd.Series(True, index=vol.index)
-            for col, value in cond.items():
-                m &= vol[col] == value
-            mask |= m
-        sel = vol[mask]
+        sel = an.rows_matching_any(vol, picked)
         label = " / ".join(picked[0].values()) or root
     else:
         sel = vol
@@ -1039,14 +987,9 @@ with tabs[3]:
         selection_table(flow_base, metric, "Selection in the flow", key="flow_table")
 
     st.markdown("**Themes in numbers**")
-    th = (
-        view.groupby("theme")
-        .agg(queries=("query", "size"), clicks=("clicks", "sum"), impressions=("impressions", "sum"))
-        .reset_index()
-    )
-    th["ctr"] = th["clicks"] / th["impressions"] * 100
-    th["click_share"] = th["clicks"] / th["clicks"].sum() * 100
-    th["clicks_per_query"] = th["clicks"] / th["queries"]
+    th = an.summarise(view, "theme")[
+        ["theme", "queries", "clicks", "impressions", "ctr", "click_share", "clicks_per_query"]
+    ]
     st.dataframe(
         th.sort_values("clicks", ascending=False).rename(columns={"theme": "ngram"}),
         column_config={
@@ -1079,29 +1022,18 @@ with tabs[4]:
         c1, c2 = st.columns(2)
         min_cq = c1.slider("Min. queries per head term", 2, 50, 5)
         bigr = c2.toggle("Also use 2-grams as head term", value=True)
-        cl = view.assign(cluster=head_clusters(view, metric, min_cq, bigr))
-        cl = cl[~cl["cluster"].isin(["(brand only)", "(noise)"])]
-        stats = (
-            cl.groupby("cluster")
-            .agg(
-                queries=("query", "size"),
-                clicks=("clicks", "sum"),
-                impressions=("impressions", "sum"),
-                theme=("theme", lambda s: s.mode().iat[0]),
-            )
-            .reset_index()
-        )
-        stats["ctr"] = stats["clicks"] / stats["impressions"] * 100
-        stats["click_share"] = stats["clicks"] / stats["clicks"].sum() * 100
-        stats["clicks_per_query"] = stats["clicks"] / stats["queries"]
+        cl = head_terms(view, metric, min_cq, bigr, exclude=(an.CLUSTER_PURE, an.CLUSTER_NOISE))
+        stats = an.summarise(cl, "cluster", theme=("theme", lambda s: s.mode().iat[0]))[
+            ["cluster", "queries", "clicks", "impressions", "theme", "ctr", "click_share", "clicks_per_query"]
+        ]
         stats = stats.sort_values(metric, ascending=False)
-        covered = stats.loc[stats["cluster"] != "(other)", metric].sum() / stats[metric].sum() * 100
+        covered = stats.loc[stats["cluster"] != an.CLUSTER_OTHER, metric].sum() / stats[metric].sum() * 100
         st.info(
             f"**{fmt(len(stats) - 1)} clusters** cover **{fmt(covered, 1)}%** of the {M.lower()} with a modifier. "
             f"The rest falls under *(other)*: terms too rare to form a cluster of their own."
         )
 
-        top_c = stats[stats["cluster"] != "(other)"].head(40)
+        top_c = stats[stats["cluster"] != an.CLUSTER_OTHER].head(40)
         fig = px.scatter(
             top_c,
             x="queries",
@@ -1174,17 +1106,9 @@ with tabs[4]:
             ev_map = st.plotly_chart(
                 style(fig, 640), width="stretch", on_select="rerun", selection_mode=("lasso", "box"), key="sem_map"
             )
-            sstats = (
-                sc.groupby("label")
-                .agg(
-                    modifiers=("modifier", "size"),
-                    clicks=("clicks", "sum"),
-                    impressions=("impressions", "sum"),
-                    examples=("modifier", lambda s: ", ".join(s.head(6))),
-                )
-                .reset_index()
-            )
-            sstats["ctr"] = sstats["clicks"] / sstats["impressions"] * 100
+            sstats = an.summarise(sc, "label", examples=("modifier", lambda s: ", ".join(s.head(6)))).rename(
+                columns={"queries": "modifiers"}
+            )[["label", "modifiers", "clicks", "impressions", "examples", "ctr"]]
             fig = px.treemap(
                 sstats,
                 path=[px.Constant("Semantic clusters"), "label"],
@@ -1380,9 +1304,7 @@ with tabs[7]:
     )
     min_group = c3.slider("Min. queries per group", 3, 50, 10)
 
-    base = view.assign(cluster=head_clusters(view, metric, 5, True)) if group_col == "cluster" else view
-    if group_col == "cluster":
-        base = base[~base["cluster"].isin(["(noise)"])]
+    base = head_terms(view, metric, exclude=(an.CLUSTER_NOISE,)) if group_col == "cluster" else view
     dev_q, dev_g = an.ctr_deviation(base, group_col, min_imp_dev, min_group)
     if dev_g.empty:
         st.info("No groups at these thresholds. Lower the minimum impressions or group size.")
@@ -1545,17 +1467,8 @@ with tabs[8]:
     if unit.endswith("-gram"):
         sc_df = ngrams(view, int(unit[0]), markets, "modifier", True, False).rename(columns={"ngram": "item"})
     elif unit == "Head term":
-        hc = view.assign(cluster=head_clusters(view, metric, 5, True))
-        hc = hc[~hc["cluster"].isin(["(noise)", "(other)"])]
-        sc_df = (
-            hc.groupby("cluster")
-            .agg(queries=("query", "size"), clicks=("clicks", "sum"), impressions=("impressions", "sum"))
-            .reset_index()
-            .rename(columns={"cluster": "item"})
-        )
-        if HAS_POSITION:
-            weighted = (hc["avg_position"] * hc["impressions"]).groupby(hc["cluster"]).sum()
-            sc_df["avg_position"] = (sc_df["item"].map(weighted) / sc_df["impressions"]).round(2)
+        hc = head_terms(view, metric, exclude=(an.CLUSTER_NOISE, an.CLUSTER_OTHER))
+        sc_df = an.summarise(hc, "cluster").rename(columns={"cluster": "item"})
     else:
         keep = ["query", "clicks", "impressions"] + (["avg_position"] if HAS_POSITION else [])
         sc_df = view[keep].rename(columns={"query": "item"}).assign(queries=1)
@@ -1683,9 +1596,7 @@ with tabs[8]:
         )
         if picked and unit != "Query":
             if unit.endswith("-gram"):
-                long = query_ngram_rows(view, int(unit[0]), "modifier", True, False)
-                rows = long.loc[long["ngram"].isin(picked), "row"].unique()
-                sel_q = view.loc[rows]
+                sel_q = an.queries_containing(view, picked, int(unit[0]), "modifier", True, False)
             else:
                 sel_q = hc[hc["cluster"].isin(picked)]
             selection_table(sel_q, metric, "Underlying queries", key="imp_click_queries")
@@ -1777,13 +1688,12 @@ with tabs[10]:
         "none": "Noise: no brand found",
     }
     how = (
-        data.groupby("match_method")
-        .agg(queries=("query", "size"), clicks=("clicks", "sum"), impressions=("impressions", "sum"))
+        an.summarise(data, "match_method")
+        .set_index("match_method")
         .reindex([m for m in METHOD_LABELS if m in set(data["match_method"])])
         .reset_index()
+        .rename(columns={"click_share": "share"})
     )
-    how["ctr"] = how["clicks"] / how["impressions"] * 100
-    how["share"] = how["clicks"] / total_clicks * 100
     how["examples"] = [
         ", ".join(data[data["match_method"] == m].nlargest(5, "clicks")["query"]) for m in how["match_method"]
     ]
@@ -1898,7 +1808,7 @@ with tabs[11]:
         "the split and clusters are most useful outside this app too: as a brand filter in Looker Studio or "
         "BigQuery, as segments in reports, or as input for a content plan."
     )
-    export = data.assign(cluster=head_clusters(data, metric, 5, True))
+    export = head_terms(data, metric)
     export["ctr"] = export["clicks"] / export["impressions"] * 100
     cols = [
         "query",

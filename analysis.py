@@ -6,6 +6,7 @@ clustering) so they can be tested without Streamlit.
 
 import io
 import re
+from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
@@ -93,7 +94,7 @@ def guess_columns(raw: pd.DataFrame) -> dict[str, str | None]:
     }
 
 
-def normalise(raw: pd.DataFrame, query_col: str, clicks_col: str, impressions_col: str,
+def _normalise(raw: pd.DataFrame, query_col: str, clicks_col: str, impressions_col: str,
               position_col: str | None = None) -> tuple[pd.DataFrame, list[str]]:
     """Build the working frame: query, clicks, impressions, [avg_position], clicks_<market>... plus market names."""
     df = pd.DataFrame({
@@ -125,7 +126,7 @@ def normalise(raw: pd.DataFrame, query_col: str, clicks_col: str, impressions_co
     return df, markets
 
 
-def to_quarter(s: pd.Series) -> pd.Series:
+def _to_quarter(s: pd.Series) -> pd.Series:
     """Quarter label "2025-Q1" from "2025-Q1", "2025Q1", "Q1 2025" or a date; anything else is kept as is."""
     text = s.astype(str).str.strip()
     out = pd.Series(pd.NA, index=s.index, dtype="object")
@@ -143,7 +144,7 @@ def to_quarter(s: pd.Series) -> pd.Series:
     return out.fillna(text)
 
 
-def period_table(raw: pd.DataFrame, query_col: str, clicks_col: str, impressions_col: str,
+def _period_table(raw: pd.DataFrame, query_col: str, clicks_col: str, impressions_col: str,
                  period_col: str) -> pd.DataFrame:
     """Long frame query, week, period, clicks, impressions.
 
@@ -151,7 +152,7 @@ def period_table(raw: pd.DataFrame, query_col: str, clicks_col: str, impressions
     (calendar or 4-4-5). Quarter labels without a date ("2025-Q1") go to ``period`` with ``week`` empty.
     """
     text = raw[period_col].astype(str).str.strip()
-    label = to_quarter(text)
+    label = _to_quarter(text)
     is_label = label.str.fullmatch(r"\d{4}-Q[1-4]") & ~text.str.fullmatch(r"\d{4}-\d{2}-\d{2}.*")
     dates = pd.to_datetime(text.where(~is_label), errors="coerce", format="mixed")
     week = (dates - pd.to_timedelta(dates.dt.weekday, unit="D")).dt.normalize()
@@ -166,12 +167,12 @@ def period_table(raw: pd.DataFrame, query_col: str, clicks_col: str, impressions
     return df.groupby(["week", "period", "query"], as_index=False, dropna=False)[["clicks", "impressions"]].sum()
 
 
-def first_monday_on_or_before(day) -> pd.Timestamp:
+def _first_monday(day) -> pd.Timestamp:
     day = pd.Timestamp(day).normalize()
     return day - pd.Timedelta(days=day.weekday())
 
 
-def week_labels(weeks: pd.Series, calendar: str = "calendar", grain: str = "quarter", start=None) -> pd.Series:
+def _week_labels(weeks: pd.Series, calendar: str = "calendar", grain: str = "quarter", start=None) -> pd.Series:
     """Period label for each week start (a Monday).
 
     calendar="calendar": ISO week "2025-W05", month "2025-M03" or quarter "2025-Q1"; a week belongs to the
@@ -188,7 +189,7 @@ def week_labels(weeks: pd.Series, calendar: str = "calendar", grain: str = "quar
         if grain == "month":
             return weeks.dt.year.astype(str) + "-M" + weeks.dt.month.map("{:02d}".format)
         return weeks.dt.year.astype(str) + "-Q" + weeks.dt.quarter.astype(str)
-    start = first_monday_on_or_before(start)
+    start = _first_monday(start)
     idx = (weeks - start).dt.days // 7
     year_no, week_in_year = idx // 52, idx % 52
     fy = ((start + pd.Timedelta(days=3)).year + year_no).astype(str)
@@ -202,19 +203,19 @@ def week_labels(weeks: pd.Series, calendar: str = "calendar", grain: str = "quar
     return "FY" + fy + "-Q" + quarter.astype(str)
 
 
-def label_periods(periods: pd.DataFrame, calendar: str = "calendar", grain: str = "quarter",
+def _label_periods(periods: pd.DataFrame, calendar: str = "calendar", grain: str = "quarter",
                   start=None) -> pd.DataFrame:
     """Fill ``period`` from ``week`` with the chosen calendar and grain; rows that only had a label keep it."""
     out = periods.copy()
     dated = out["week"].notna()
     if dated.any():
         unique = pd.Series(out.loc[dated, "week"].unique())
-        mapping = dict(zip(unique, week_labels(unique, calendar, grain, start)))
+        mapping = dict(zip(unique, _week_labels(unique, calendar, grain, start)))
         out.loc[dated, "period"] = out.loc[dated, "week"].map(mapping)
     return out
 
 
-def incomplete_periods(periods: pd.DataFrame, calendar: str = "calendar", grain: str = "quarter",
+def _incomplete_periods(periods: pd.DataFrame, calendar: str = "calendar", grain: str = "quarter",
                        start=None) -> list[str]:
     """Periods with fewer weeks in the data than they span: usually the first and last one."""
     weeks = pd.Series(periods["week"].dropna().unique())
@@ -222,15 +223,15 @@ def incomplete_periods(periods: pd.DataFrame, calendar: str = "calendar", grain:
         return []
     full = pd.Series(pd.date_range(weeks.min() - pd.Timedelta(days=400), weeks.max() + pd.Timedelta(days=400),
                                    freq="W-MON"))
-    expected = week_labels(full, calendar, grain, start).value_counts()
-    present = week_labels(weeks, calendar, grain, start).value_counts()
+    expected = _week_labels(full, calendar, grain, start).value_counts()
+    present = _week_labels(weeks, calendar, grain, start).value_counts()
     return sorted(p for p, n in present.items() if n < expected.get(p, 0))
 
 
-def theme_trend(periods: pd.DataFrame, themed: pd.DataFrame, metric: str) -> pd.DataFrame:
+def _theme_trend(periods: pd.DataFrame, themed: pd.DataFrame, metric: str) -> pd.DataFrame:
     """Volume per theme per period plus its share of that period's volume.
 
-    ``periods`` needs a filled ``period`` column (see label_periods). Themes come from ``themed``
+    ``periods`` needs a filled ``period`` column (see _label_periods). Themes come from ``themed``
     (one row per query, already filtered); queries not in it are dropped.
     """
     merged = periods.merge(themed[["query", "theme"]], on="query", how="inner")
@@ -245,7 +246,7 @@ def _year_earlier(period: str) -> str | None:
     return f"{m.group(1) or ''}{int(m.group(2)) - 1}-{m.group(3)}" if m else None
 
 
-def trend_summary(trend: pd.DataFrame, metric: str) -> pd.DataFrame:
+def _trend_summary(trend: pd.DataFrame, metric: str) -> pd.DataFrame:
     """One row per theme: volume per period, change of the last period vs the previous one and vs a year earlier."""
     wide = trend.pivot_table(index="theme", columns="period", values=metric, aggfunc="sum", fill_value=0)
     periods = sorted(wide.columns)
@@ -266,8 +267,109 @@ def trend_summary(trend: pd.DataFrame, metric: str) -> pd.DataFrame:
     return out.sort_values(last, ascending=False).reset_index()
 
 
-def load_queries(source) -> tuple[pd.DataFrame, list[str]]:
-    """Read a GSC-style query export with automatic column detection."""
+@dataclass(frozen=True)
+class Columns:
+    """Which source columns hold what. ``period``: a week, date or quarter column, one row per query per period."""
+
+    query: str
+    clicks: str
+    impressions: str
+    position: str | None = None
+    period: str | None = None
+
+
+@dataclass(frozen=True)
+class Calendar:
+    """How weeks are grouped: ``kind`` "calendar" or "445" (52-week years from ``start``, quarters of 4-4-5
+    weeks), ``grain`` "week", "month" (a 4-4-5 period) or "quarter". ``start`` snaps back to a Monday."""
+
+    kind: str = "calendar"
+    grain: str = "quarter"
+    start: object = None
+
+    @property
+    def unit_name(self) -> str:
+        if self.grain == "month" and self.kind == "445":
+            return "period"
+        return self.grain
+
+    @property
+    def week_start(self) -> pd.Timestamp | None:
+        return _first_monday(self.start) if self.kind == "445" and self.start is not None else None
+
+
+@dataclass
+class ThemeTrend:
+    """Volume per theme per period. ``long``: period, theme, clicks, impressions, share (% of the period).
+    ``summary``: one row per theme with a column per period, vs_previous, vs_year_earlier (both %),
+    share_last and share_change_pp. ``incomplete``: periods with weeks missing from the data."""
+
+    long: pd.DataFrame
+    summary: pd.DataFrame
+    order: list[str]
+    incomplete: list[str]
+    unit_name: str
+
+
+class WeeklyVolumes:
+    """Clicks and impressions per query per week (or per quarter label when the data has no dates)."""
+
+    def __init__(self, frame: pd.DataFrame):
+        self._frame = frame
+
+    @property
+    def has_dates(self) -> bool:
+        return bool(self._frame["week"].notna().any())
+
+    def describe(self) -> str:
+        """Short size label for the sidebar, e.g. "90 weeks"."""
+        if self.has_dates:
+            return f"{self._frame['week'].nunique()} weeks"
+        return f"{self._frame['period'].nunique()} quarters"
+
+    def default_start(self):
+        """Default 4-4-5 start: the Monday on or before 1 January of the first year in the data."""
+        first = self._frame["week"].min()
+        return _first_monday(pd.Timestamp(first.year, 1, 1)).date()
+
+    def trend(self, themed: pd.DataFrame, metric: str, calendar: Calendar | None = None) -> ThemeTrend:
+        """Volume per theme per period for the queries in ``themed`` (one row per query with a ``theme``).
+
+        Without dates only calendar quarters exist, whatever ``calendar`` says.
+        """
+        calendar = calendar or Calendar()
+        kind, grain, start = (calendar.kind, calendar.grain, calendar.week_start) if self.has_dates else (
+            "calendar", "quarter", None)
+        long = _theme_trend(_label_periods(self._frame, kind, grain, start), themed, metric)
+        if long.empty:
+            return ThemeTrend(long, pd.DataFrame(), [], [], calendar.unit_name)
+        incomplete = _incomplete_periods(self._frame, kind, grain, start) if self.has_dates else []
+        return ThemeTrend(long, _trend_summary(long, metric), sorted(long["period"].unique()), incomplete,
+                          Calendar(kind, grain).unit_name)
+
+
+@dataclass
+class QueryData:
+    """Loaded data: ``queries`` has one row per query (query, clicks, impressions, [avg_position],
+    clicks_<market>...), ``markets`` the market names, ``weekly`` the volumes per week when there is a period column."""
+
+    queries: pd.DataFrame
+    markets: list[str]
+    weekly: WeeklyVolumes | None = None
+
+
+def load(table: pd.DataFrame, columns: Columns) -> QueryData:
+    """Turn a raw table into the working data. Rows of the same query (e.g. per week) are summed."""
+    queries, markets = _normalise(table, columns.query, columns.clicks, columns.impressions, columns.position)
+    weekly = None
+    if columns.period is not None and columns.period not in (columns.query, columns.clicks, columns.impressions):
+        weekly = WeeklyVolumes(_period_table(table, columns.query, columns.clicks, columns.impressions,
+                                             columns.period))
+    return QueryData(queries, markets, weekly)
+
+
+def load_queries(source) -> QueryData:
+    """Read a query export (file path or file object) with automatic column detection."""
     raw = read_table(source)
     guess = guess_columns(raw)
     if None in (guess["query"], guess["clicks"], guess["impressions"]):
@@ -275,7 +377,7 @@ def load_queries(source) -> tuple[pd.DataFrame, list[str]]:
             "Could not find the query, clicks and impressions columns. "
             f"Columns found: {', '.join(map(str, raw.columns))}"
         )
-    return normalise(raw, guess["query"], guess["clicks"], guess["impressions"], guess["position"])
+    return load(raw, Columns(**guess))
 
 
 def _to_number(s: pd.Series) -> pd.Series:
@@ -528,6 +630,81 @@ def assign_themes(df: pd.DataFrame, themes: dict[str, set[str]]) -> pd.Series:
 
 
 # --------------------------------------------------------------------------- #
+# Enrichment and selection
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class BrandConfig:
+    """What counts as brand, and the theme rules (``Theme: word, word`` lines, first match wins)."""
+
+    brands: tuple[str, ...]
+    typos: tuple[str, ...] = ()
+    fuzzy: bool = True
+    partial_min_ctr: float | None = None
+    themes: str = themes_to_text(DEFAULT_THEMES)
+
+
+def enrich(df: pd.DataFrame, config: BrandConfig) -> pd.DataFrame:
+    """Brand split (see ``split_brand``) plus a ``theme`` per query."""
+    out = split_brand(df, list(config.brands), list(config.typos), config.fuzzy, config.partial_min_ctr)
+    out["theme"] = assign_themes(out, parse_themes(config.themes))
+    return out
+
+
+@dataclass(frozen=True)
+class Selection:
+    """Which enriched queries the analyses look at.
+
+    Noise is left out unless ``include_noise``. ``only_products`` keeps the product theme only (plus noise
+    when included) and overrides ``exclude_themes``. ``min_impressions`` applies per query.
+    """
+
+    include_noise: bool = False
+    only_products: bool = False
+    exclude_themes: tuple[str, ...] = ()
+    min_impressions: float = 0
+
+
+def select(data: pd.DataFrame, selection: Selection) -> pd.DataFrame:
+    view = data if selection.include_noise else data[data["is_branded"]]
+    if selection.only_products:
+        view = view[view["theme"].isin([THEME_PRODUCT, NOISE])]
+    elif selection.exclude_themes:
+        view = view[~view["theme"].isin(selection.exclude_themes)]
+    if selection.min_impressions:
+        view = view[view["impressions"] >= selection.min_impressions]
+    return view
+
+
+# --------------------------------------------------------------------------- #
+# Volume per group
+# --------------------------------------------------------------------------- #
+def summarise(df: pd.DataFrame, by, markets=(), **extra) -> pd.DataFrame:
+    """Volume per group, one row per value of ``by`` (a column name or a list of them).
+
+    Always: queries (rows in the group), clicks, impressions, ctr (%, 0 without impressions),
+    click_share (% of all clicks in ``df``) and clicks_per_query. Plus clicks_<market> for each of
+    ``markets`` and, when ``df`` has avg_position, the impression-weighted average position.
+    ``extra`` adds named aggregations in pandas ``agg`` style, e.g. ``theme=("theme", "first")``.
+    """
+    keys = [by] if isinstance(by, str) else list(by)
+    sums = ["clicks", "impressions"] + [f"clicks_{m}" for m in markets]
+    has_position = "avg_position" in df.columns
+    if has_position:
+        df = df.assign(_pos_weight=df["avg_position"].fillna(0) * df["impressions"])
+        sums.append("_pos_weight")
+    out = df.groupby(keys).agg(
+        queries=("clicks", "size"), **{c: (c, "sum") for c in sums}, **extra
+    ).reset_index()
+    out["ctr"] = (out["clicks"] / out["impressions"].where(out["impressions"] > 0) * 100).fillna(0.0)
+    if has_position:
+        out["avg_position"] = (out.pop("_pos_weight") / out["impressions"].where(out["impressions"] > 0)).round(2)
+    total_clicks = df["clicks"].sum()
+    out["click_share"] = out["clicks"] / total_clicks * 100 if total_clicks else 0.0
+    out["clicks_per_query"] = out["clicks"] / out["queries"]
+    return out
+
+
+# --------------------------------------------------------------------------- #
 # N-grams
 # --------------------------------------------------------------------------- #
 def _ngrams(tokens: list[str], n: int) -> list[str]:
@@ -552,33 +729,58 @@ def query_ngrams(df: pd.DataFrame, n: int, column: str = "modifier",
     return pd.DataFrame({"row": rows, "ngram": grams})
 
 
+def queries_containing(df: pd.DataFrame, grams, n: int, column: str = "modifier", drop_stopwords: bool = False,
+                       drop_market: bool = False) -> pd.DataFrame:
+    """Rows of ``df`` whose ``column`` contains any of ``grams`` (n-grams of ``n`` words), with the same
+    stopword and country-word filtering as ``ngram_table``, so a row in that table maps to these queries."""
+    long = query_ngrams(df, n, column, drop_stopwords, drop_market)
+    return df.loc[long.loc[long["ngram"].isin(set(grams)), "row"].unique()]
+
+
+def rows_matching_any(df: pd.DataFrame, conditions: list[dict]) -> pd.DataFrame:
+    """Rows that match at least one condition; a condition is {column: value, ...} and needs all its columns
+    to match. An empty condition matches every row."""
+    mask = pd.Series(False, index=df.index)
+    for cond in conditions:
+        m = pd.Series(True, index=df.index)
+        for col, value in cond.items():
+            m &= df[col] == value
+        mask |= m
+    return df[mask]
+
+
 def ngram_table(df: pd.DataFrame, n: int, markets: list[str], column: str = "modifier",
                 drop_stopwords: bool = False, drop_market: bool = False) -> pd.DataFrame:
     """Aggregate clicks/impressions/queries per n-gram (each query counted once)."""
     long = query_ngrams(df, n, column, drop_stopwords, drop_market)
     if long.empty:
         return pd.DataFrame(columns=["ngram", "queries", "clicks", "impressions", "ctr"])
-    metric_cols = ["clicks", "impressions"] + [f"clicks_{m}" for m in markets]
-    has_position = "avg_position" in df.columns
-    if has_position:
-        df = df.assign(pos_weight=df["avg_position"].fillna(0) * df["impressions"])
-        metric_cols.append("pos_weight")
-    joined = long.join(df[metric_cols], on="row")
-    agg = joined.groupby("ngram").agg(
-        queries=("row", "size"), **{c: (c, "sum") for c in metric_cols}
-    ).reset_index()
-    agg["ctr"] = np.where(agg["impressions"] > 0, agg["clicks"] / agg["impressions"] * 100, 0.0)
-    if has_position:
-        agg["avg_position"] = (agg.pop("pos_weight") / agg["impressions"].where(agg["impressions"] > 0)).round(2)
+    cols = ["clicks", "impressions"] + [f"clicks_{m}" for m in markets]
+    cols += ["avg_position"] if "avg_position" in df.columns else []
+    agg = summarise(long.join(df[cols], on="row"), "ngram", markets)
+    # Overlapping n-grams: shares are of all clicks in df, not of the n-gram total.
     total_clicks = df["clicks"].sum()
     agg["click_share"] = agg["clicks"] / total_clicks * 100 if total_clicks else 0.0
-    agg["clicks_per_query"] = agg["clicks"] / agg["queries"]
     return agg.sort_values("clicks", ascending=False, ignore_index=True)
 
 
 # --------------------------------------------------------------------------- #
 # Clustering
 # --------------------------------------------------------------------------- #
+# Head-term labels for queries that get no head term of their own.
+CLUSTER_OTHER = "(other)"  # modifier too rare to form a cluster
+CLUSTER_PURE = "(brand only)"  # no modifier
+CLUSTER_NOISE = "(noise)"  # not branded
+
+
+def with_head_terms(df: pd.DataFrame, metric: str = "clicks", min_queries: int = 5, use_bigrams: bool = True,
+                    exclude=()) -> pd.DataFrame:
+    """``df`` plus a ``cluster`` column (see ``head_term_clusters``), without rows whose cluster is in
+    ``exclude`` (e.g. ``[CLUSTER_NOISE, CLUSTER_OTHER]``). Clusters depend on the rows passed in."""
+    out = df.assign(cluster=head_term_clusters(df, metric, min_queries, use_bigrams))
+    return out[~out["cluster"].isin(exclude)] if exclude else out
+
+
 def head_term_clusters(df: pd.DataFrame, metric: str = "clicks", min_queries: int = 5,
                        use_bigrams: bool = True) -> pd.Series:
     """Greedy n-gram grouping.
@@ -615,10 +817,10 @@ def head_term_clusters(df: pd.DataFrame, metric: str = "clicks", min_queries: in
     best = (ranked.sort_values(["words", "rank"], ascending=[False, True])
             .drop_duplicates("row").set_index("row")["ngram"])
 
-    result = pd.Series("(other)", index=df.index, dtype=object)
+    result = pd.Series(CLUSTER_OTHER, index=df.index, dtype=object)
     result.loc[best.index] = best
-    result[df["modifier"].eq("")] = "(brand only)"
-    result[~df["is_branded"]] = "(noise)"
+    result[df["modifier"].eq("")] = CLUSTER_PURE
+    result[~df["is_branded"]] = CLUSTER_NOISE
     return result
 
 
@@ -749,16 +951,13 @@ def ctr_deviation(df: pd.DataFrame, group_col: str, min_impressions: float = 0,
     d["click_delta"] = (d["deviation"] / 100 * d["impressions"]).round()
 
     overall_median = d["ctr"].median() if len(d) else 0.0
-    groups = d.groupby(group_col).agg(
-        queries=("query", "size"),
-        clicks=("clicks", "sum"),
-        impressions=("impressions", "sum"),
+    groups = summarise(
+        d, group_col,
         median_ctr=("ctr", "median"),
         q25=("ctr", lambda s: s.quantile(0.25)),
         q75=("ctr", lambda s: s.quantile(0.75)),
         missed_clicks=("click_delta", lambda s: -s[s < 0].sum()),
-    ).reset_index()
-    groups["weighted_ctr"] = groups["clicks"] / groups["impressions"] * 100
+    ).rename(columns={"ctr": "weighted_ctr"})
     groups["vs_overall"] = groups["median_ctr"] - overall_median
     groups["spread"] = groups["q75"] - groups["q25"]
     groups.attrs["overall_median"] = overall_median
@@ -785,8 +984,7 @@ def near_brand_tokens(df: pd.DataFrame, brands: list[str]) -> pd.DataFrame:
     alt = "|".join(re.escape(f) for f in sorted(forms, key=len, reverse=True))
     exploded = noise.assign(token=noise["query"].str.split()).explode("token")
     exploded = exploded[exploded["token"].str.contains(alt, na=False)]
-    agg = exploded.groupby("token").agg(
-        queries=("query", "size"), clicks=("clicks", "sum"), impressions=("impressions", "sum")
-    ).reset_index()
-    agg["ctr"] = np.where(agg["impressions"] > 0, agg["clicks"] / agg["impressions"] * 100, 0.0)
-    return agg.sort_values("clicks", ascending=False, ignore_index=True)
+    agg = summarise(exploded[["token", "clicks", "impressions"]], "token")
+    return agg[["token", "queries", "clicks", "impressions", "ctr"]].sort_values(
+        "clicks", ascending=False, ignore_index=True
+    )

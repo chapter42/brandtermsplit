@@ -89,6 +89,19 @@
   (week/month/quarter) or 4-4-5 (week/period/quarter, 52-week years from a chosen Monday, no 53rd week)
   and flags periods with missing weeks.
 
+**Refactor: deeper modules in `analysis.py`, no behaviour change**
+- `summarise(df, by)`: the one place for queries/clicks/impressions/CTR/share/clicks per query/weighted
+  position per group; replaced ~12 hand-rolled groupbys in `app.py` and `analysis.py`.
+- `BrandConfig` + `enrich` (brand split + themes) and `Selection` + `select` (sidebar filters, now tested).
+- `with_head_terms(..., exclude=)` plus `CLUSTER_OTHER/PURE/NOISE` instead of string sentinels in every tab.
+- `Columns` + `load` -> `QueryData(queries, markets, weekly)`; `WeeklyVolumes.trend(themed, metric, Calendar)`
+  -> `ThemeTrend`. Period helpers are private; tests go through `load` and `trend`.
+- `queries_containing` and `rows_matching_any` map chart selections back to queries.
+- Checked against the pre-refactor code with a snapshot of every table, metric and chart: 11 scenarios
+  (sidebar filters, brand/typo/theme settings, semantic clusters, head-term scatter, CTR deviation groups)
+  on the real CSV, a weekly file and a file with average position: identical. Not covered: chart clicks and
+  table row selections (AppTest can't drive them; unit tests cover the mapping) and the Search Console path.
+
 **Next**
 - Numbers in tables use the browser locale (`format="localized"`); a Dutch browser shows 1.000, an English one 1,000.
 
