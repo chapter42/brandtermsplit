@@ -107,3 +107,11 @@
 
 - Phase 2: BigQuery bulk export as a source (bigquery.readonly scope, dry-run cost estimate).
 - Optional: TypeSafe intent classification as an opt-in alternative to keyword themes.
+
+## 2026-10-16
+
+**Broke / fixed**
+- Streamlit Cloud raised `AttributeError` on `an.Columns` after the deploy of 2a9d9d2: the cloud kept the old
+  `analysis` module in memory. A reboot of the app fixed it; no code change.
+- Search Console period picker: the range picker reran the app after the first click, closing the calendar
+  before an end date could be picked. Replaced with separate "From" and "To" pickers plus a start ≤ end check.

@@ -253,13 +253,14 @@ def gsc_panel():
     site = st.selectbox("Property", sites)
     today = date.today()
     latest = today - timedelta(days=3)  # GSC data lags a few days
-    period = st.date_input(
-        "Period",
-        (latest - timedelta(days=89), latest),
-        min_value=today - timedelta(days=486),
-        max_value=latest,
-        format="YYYY-MM-DD",
+    # Two single pickers instead of one range picker: the range picker reruns the app after the first click,
+    # which closes the calendar before an end date can be picked.
+    earliest = today - timedelta(days=486)  # GSC keeps 16 months
+    c1, c2 = st.columns(2)
+    start_date = c1.date_input(
+        "From", latest - timedelta(days=89), min_value=earliest, max_value=latest, format="YYYY-MM-DD"
     )
+    end_date = c2.date_input("To", latest, min_value=earliest, max_value=latest, format="YYYY-MM-DD")
     search_type = st.selectbox(
         "Search type",
         ["web", "image", "video", "news"],
@@ -273,13 +274,13 @@ def gsc_panel():
     )
     max_rows = st.select_slider("Max. rows", [25_000, 50_000, 100_000, 250_000, 500_000], value=100_000)
     if st.button("Fetch data", type="primary", width="stretch"):
-        if not isinstance(period, tuple) or len(period) != 2:
-            st.warning("Pick a start and an end date.")
+        if start_date > end_date:
+            st.warning("The start date is after the end date.")
             st.stop()
         st.session_state["gsc_request"] = {
             "site": site,
-            "start": period[0].isoformat(),
-            "end": period[1].isoformat(),
+            "start": start_date.isoformat(),
+            "end": end_date.isoformat(),
             "search_type": search_type,
             "only_brand": only_brand,
             "max_rows": max_rows,
